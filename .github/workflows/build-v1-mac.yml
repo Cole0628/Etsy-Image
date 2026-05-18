@@ -1,0 +1,84 @@
+name: Build V1.0 macOS Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Git tag to package"
+        required: true
+        default: "V1.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    name: Build macOS zip assets
+    runs-on: macos-14
+    env:
+      BUILD_VERSION: "1.0.0"
+      NODE_STANDALONE_VERSION: "20.18.1"
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag_name }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Next.js app
+        run: npm run build
+
+      - name: Prepare standalone server
+        run: npm run desktop:prepare
+
+      - name: Build macOS packages
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag_name="${{ inputs.tag_name }}"
+          artifact_prefix="KieWorkbench-${tag_name}-mac"
+          rm -f release/KieWorkbench-*-mac-*.zip
+
+          for arch in x64 arm64; do
+            tmp_dir="$(mktemp -d)"
+            node_url="https://nodejs.org/dist/v${NODE_STANDALONE_VERSION}/node-v${NODE_STANDALONE_VERSION}-darwin-${arch}.tar.gz"
+
+            curl -fsSL "${node_url}" -o "${tmp_dir}/node.tar.gz"
+            tar -xzf "${tmp_dir}/node.tar.gz" -C "${tmp_dir}"
+            cp "${tmp_dir}/node-v${NODE_STANDALONE_VERSION}-darwin-${arch}/bin/node" dist-standalone/node
+            chmod +x dist-standalone/node
+
+            npx electron-builder --mac zip --"${arch}" --publish never \
+              --config.extraMetadata.version="${BUILD_VERSION}" \
+              --config.mac.identity=null \
+              "--config.mac.artifactName=${artifact_prefix}-\${arch}.\${ext}"
+          done
+
+      - name: Upload packages to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          tag_name="${{ inputs.tag_name }}"
+          assets=(release/KieWorkbench-"${tag_name}"-mac-*.zip)
+
+          if gh release view "${tag_name}" >/dev/null 2>&1; then
+            gh release upload "${tag_name}" "${assets[@]}" --clobber
+          else
+            gh release create "${tag_name}" "${assets[@]}" \
+              --verify-tag \
+              --title "${tag_name}" \
+              --notes "macOS builds for ${tag_name}."
+          fi
