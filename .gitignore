@@ -1,0 +1,35 @@
+# dependencies
+/node_modules
+/.pnp
+.pnp.js
+
+# next.js
+/.next/
+/out/
+
+# misc
+.DS_Store
+*.pem
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+dev-server*.log
+
+# local data
+/data
+/Output
+
+# uploaded reference images (local dev)
+public/uploads/kie-workbench/*
+!public/uploads/kie-workbench/.gitkeep
+
+# env
+.env
+.env*.local
+
+# electron / portable
+/release/
+/dist-standalone/
+
+# typescript
+next-env.d.ts

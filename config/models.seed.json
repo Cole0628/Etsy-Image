@@ -1,0 +1,10 @@
+{
+  "models": [
+    {
+      "id": "gpt-image-2-image-to-image",
+      "label": "GPT Image 2 · Image to Image",
+      "kie_model": "gpt-image-2-image-to-image",
+      "notes": "数据库会在首次启动时自动种子化；此文件仅作文档参考。"
+    }
+  ]
+}
