@@ -57,6 +57,15 @@ type BatchOutputItem = {
   clientElapsedMs?: number | null;
 };
 
+type ActiveProject = {
+  id: string;
+  label: string;
+  prompt: string;
+  workbenchId: WorkbenchId;
+  submittedAt: number;
+  items: BatchOutputItem[];
+};
+
 type DownloadedFile = {
   filename: string;
   path: string;
@@ -91,8 +100,10 @@ type WorkbenchDraft = {
   refSlots: ImageSlot[];
   pasteProduct: string;
   pasteRef: string;
-  batchOutputs: BatchOutputItem[] | null;
-  pollStartAt: number | null;
+  activeProjects: ActiveProject[];
+  selectedActiveProjectId?: string | null;
+  batchOutputs?: BatchOutputItem[] | null;
+  pollStartAt?: number | null;
 };
 
 const ASPECT_OPTIONS = ["auto", "1:1", "9:16", "16:9", "4:3", "3:4"] as const;
@@ -104,7 +115,7 @@ const POLL_MS = 3000;
 const TIMEOUT_MS = 15 * 60 * 1000;
 
 function isProductWorkbench(id: WorkbenchId): boolean {
-  return id === "etsy" || id === "story-set";
+  return id === "etsy" || id === "story-set" || id === "sku-background";
 }
 
 function normalizeImageSlots(value: unknown): ImageSlot[] {
@@ -147,8 +158,32 @@ function normalizeBatchOutputs(value: unknown): BatchOutputItem[] | null {
         typeof item.clientElapsedMs === "number" &&
         Number.isFinite(item.clientElapsedMs)
           ? item.clientElapsedMs
-          : null,
+        : null,
     }));
+}
+
+function normalizeActiveProjects(value: unknown): ActiveProject[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter(
+      (item): item is ActiveProject =>
+        Boolean(item) &&
+        typeof item === "object" &&
+        typeof (item as ActiveProject).id === "string" &&
+        typeof (item as ActiveProject).label === "string" &&
+        typeof (item as ActiveProject).prompt === "string" &&
+        isWorkbenchId((item as ActiveProject).workbenchId) &&
+        typeof (item as ActiveProject).submittedAt === "number"
+    )
+    .map((item) => ({
+      id: item.id,
+      label: item.label,
+      prompt: item.prompt,
+      workbenchId: item.workbenchId,
+      submittedAt: item.submittedAt,
+      items: normalizeBatchOutputs(item.items) ?? [],
+    }))
+    .filter((item) => item.items.length > 0);
 }
 
 function readWorkbenchDraft(): WorkbenchDraft | null {
@@ -158,7 +193,12 @@ function readWorkbenchDraft(): WorkbenchDraft | null {
     const parsed = JSON.parse(raw) as Partial<WorkbenchDraft>;
     if (parsed.v !== 1 || !isWorkbenchId(parsed.workbenchId)) return null;
     const imageCount = Number(parsed.imageCount);
+    const activeProjects = normalizeActiveProjects(parsed.activeProjects);
     const batchOutputs = normalizeBatchOutputs(parsed.batchOutputs);
+    const legacySubmittedAt =
+      typeof parsed.pollStartAt === "number" && Number.isFinite(parsed.pollStartAt)
+        ? parsed.pollStartAt
+        : batchOutputs?.[0]?.submittedAt ?? Date.now();
     return {
       v: 1,
       workbenchId: parsed.workbenchId,
@@ -181,11 +221,25 @@ function readWorkbenchDraft(): WorkbenchDraft | null {
       pasteProduct:
         typeof parsed.pasteProduct === "string" ? parsed.pasteProduct : "",
       pasteRef: typeof parsed.pasteRef === "string" ? parsed.pasteRef : "",
-      batchOutputs,
-      pollStartAt:
-        typeof parsed.pollStartAt === "number" && Number.isFinite(parsed.pollStartAt)
-          ? parsed.pollStartAt
-          : batchOutputs?.[0]?.submittedAt ?? null,
+      activeProjects:
+        activeProjects.length > 0
+          ? activeProjects
+          : batchOutputs?.length
+            ? [
+                {
+                  id: `legacy:${legacySubmittedAt}`,
+                  label: "当前项目",
+                  prompt: typeof parsed.prompt === "string" ? parsed.prompt : "",
+                  workbenchId: parsed.workbenchId,
+                  submittedAt: legacySubmittedAt,
+                  items: batchOutputs,
+                },
+              ]
+            : [],
+      selectedActiveProjectId:
+        typeof parsed.selectedActiveProjectId === "string"
+          ? parsed.selectedActiveProjectId
+          : null,
     };
   } catch {
     return null;
@@ -207,6 +261,19 @@ function formatGenDuration(ms: number | null | undefined): string {
   if (ms == null || !Number.isFinite(ms) || ms < 0) return "—";
   if (ms < 1000) return `${Math.round(ms)} ms`;
   return `${(ms / 1000).toFixed(1)} s`;
+}
+
+function splitImageUrlText(raw: string): string[] {
+  const seen = new Set<string>();
+  return raw
+    .split(/[\s,，;；]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .filter((item) => {
+      if (seen.has(item)) return false;
+      seen.add(item);
+      return true;
+    });
 }
 
 function sortProjectRows(rows: Generation[]): Generation[] {
@@ -278,10 +345,10 @@ export default function Workbench() {
   const [error, setError] = useState<string | null>(null);
   const [downloadKeys, setDownloadKeys] = useState<Set<string>>(() => new Set());
   const [downloadMessage, setDownloadMessage] = useState<string | null>(null);
-  const [batchOutputs, setBatchOutputs] = useState<BatchOutputItem[] | null>(null);
+  const [activeProjects, setActiveProjects] = useState<ActiveProject[]>([]);
+  const [selectedActiveProjectId, setSelectedActiveProjectId] = useState<string | null>(null);
   const [history, setHistory] = useState<Generation[]>([]);
-  const pollStartRef = useRef<number | null>(null);
-  const batchOutputsRef = useRef<BatchOutputItem[] | null>(null);
+  const activeProjectsRef = useRef<ActiveProject[]>([]);
   const fileInputProductRef = useRef<HTMLInputElement>(null);
   const fileInputRefRef = useRef<HTMLInputElement>(null);
   const dragDepthProductRef = useRef(0);
@@ -290,8 +357,11 @@ export default function Workbench() {
   const lastDropRefRef = useRef(0);
   const draftLoadedRef = useRef(false);
 
-  batchOutputsRef.current = batchOutputs;
-  const batchOutputCount = batchOutputs?.length ?? 0;
+  activeProjectsRef.current = activeProjects;
+  const activeTaskCount = activeProjects.reduce(
+    (sum, project) => sum + project.items.length,
+    0
+  );
 
   const loadBootstrap = useCallback(async () => {
     const r = await fetch("/api/bootstrap");
@@ -345,8 +415,12 @@ export default function Workbench() {
       setRefSlots(draft.refSlots);
       setPasteProduct(draft.pasteProduct);
       setPasteRef(draft.pasteRef);
-      setBatchOutputs(draft.batchOutputs);
-      pollStartRef.current = draft.pollStartAt;
+      setActiveProjects(draft.activeProjects);
+      setSelectedActiveProjectId(
+        draft.selectedActiveProjectId && draft.activeProjects.some((p) => p.id === draft.selectedActiveProjectId)
+          ? draft.selectedActiveProjectId
+          : draft.activeProjects[0]?.id ?? null
+      );
     }
     draftLoadedRef.current = true;
   }, []);
@@ -357,6 +431,16 @@ export default function Workbench() {
     void loadHistory();
     void loadWorkbenchSettings();
   }, [loadBootstrap, loadModels, loadHistory, loadWorkbenchSettings]);
+
+  useEffect(() => {
+    if (activeProjects.length === 0) {
+      if (selectedActiveProjectId !== null) setSelectedActiveProjectId(null);
+      return;
+    }
+    if (!selectedActiveProjectId || !activeProjects.some((p) => p.id === selectedActiveProjectId)) {
+      setSelectedActiveProjectId(activeProjects[0].id);
+    }
+  }, [activeProjects, selectedActiveProjectId]);
 
   useEffect(() => {
     if (!draftLoadedRef.current) return;
@@ -372,8 +456,8 @@ export default function Workbench() {
       refSlots,
       pasteProduct,
       pasteRef,
-      batchOutputs,
-      pollStartAt: pollStartRef.current,
+      activeProjects,
+      selectedActiveProjectId,
     };
     try {
       window.localStorage.setItem(WORKBENCH_DRAFT_KEY, JSON.stringify(draft));
@@ -391,10 +475,12 @@ export default function Workbench() {
     refSlots,
     pasteProduct,
     pasteRef,
-    batchOutputs,
+    activeProjects,
+    selectedActiveProjectId,
   ]);
 
   const productWorkbench = isProductWorkbench(workbenchId);
+  const skuBackgroundWorkbench = workbenchId === "sku-background";
   const inputCount = productWorkbench
     ? productSlots.length + refSlots.length
     : refSlots.length;
@@ -404,13 +490,28 @@ export default function Workbench() {
       ? "描述这套图的故事、用途、场景、情绪与必须展示的卖点……"
       : workbenchId === "etsy"
       ? "描述希望如何基于产品图生成展示图……"
+      : workbenchId === "sku-background"
+      ? "描述 SKU 换背景的商业风格、构图要求、保留细节与禁止项；避免悬空手、断手、AI感人体……"
       : "描述你想生成的图片……";
-  const referenceLabel = workbenchId === "story-set" ? "套图参考" : "参考图";
+  const referenceLabel =
+    workbenchId === "story-set"
+      ? "套图参考"
+      : skuBackgroundWorkbench
+        ? "背景图"
+        : "参考图";
+  const selectedActiveProject =
+    activeProjects.find((project) => project.id === selectedActiveProjectId) ??
+    activeProjects[0] ??
+    null;
   const currentResultUrls = useMemo(
-    () => batchOutputs?.flatMap((item) => item.resultUrls) ?? [],
-    [batchOutputs]
+    () =>
+      selectedActiveProject?.items.flatMap((item) => item.resultUrls) ?? [],
+    [selectedActiveProject]
   );
-  const historyProjects = useMemo(() => buildHistoryProjects(history), [history]);
+  const historyProjects = useMemo(
+    () => buildHistoryProjects(history).filter((project) => project.workbenchId === workbenchId),
+    [history, workbenchId]
+  );
 
   const setDownloadActive = (key: string, active: boolean) => {
     setDownloadKeys((prev) => {
@@ -463,19 +564,54 @@ export default function Workbench() {
     }
   };
 
-  const addUrl = (kind: "product" | "reference") => {
+  const getAvailableUploadSlots = (kind: "product" | "reference") => {
+    const remainingTotal = Math.max(0, 16 - inputCount);
+    if (!productWorkbench) {
+      return Math.max(0, 16 - refSlots.length);
+    }
+    if (skuBackgroundWorkbench && kind === "product") {
+      return Math.min(remainingTotal, Math.max(0, 10 - productSlots.length));
+    }
+    return remainingTotal;
+  };
+
+  const uploadLimitLabel = (kind: "product" | "reference") => {
+    if (skuBackgroundWorkbench && kind === "product") {
+      return "SKU 产品图最多 10 张，且 SKU 产品图与背景图合计最多 16 张。";
+    }
+    if (productWorkbench) {
+      return workbenchId === "story-set"
+        ? "产品图与套图参考合计最多 16 张。"
+        : skuBackgroundWorkbench
+          ? "SKU 产品图与背景图合计最多 16 张。"
+          : "产品图与参考图合计最多 16 张。";
+    }
+    return "参考图最多 16 张。";
+  };
+
+  const addUrls = (kind: "product" | "reference") => {
     const raw = kind === "product" ? pasteProduct.trim() : pasteRef.trim();
     if (!raw) return;
-    if (!isAllowedInputImageUrl(raw)) {
-      setError("请输入有效地址：公网 https，或本机 http://localhost / http://127.0.0.1 …");
+    const urls = splitImageUrlText(raw);
+    if (urls.length === 0) return;
+    const invalid = urls.find((url) => !isAllowedInputImageUrl(url));
+    if (invalid) {
+      setError(
+        `请输入有效地址：公网 https，或本机 http://localhost / http://127.0.0.1 …（无效：${invalid}）`
+      );
       return;
     }
-    const slot: ImageSlot = { id: crypto.randomUUID(), url: raw };
+    const available = getAvailableUploadSlots(kind);
+    if (urls.length > available) {
+      setError(`本次最多还能添加 ${available} 张。${uploadLimitLabel(kind)}`);
+      return;
+    }
+    const slots = urls.map((url) => ({ id: crypto.randomUUID(), url }));
     if (kind === "product") {
-      setProductSlots((s) => [...s, slot]);
+      setProductSlots((s) => [...s, ...slots]);
       setPasteProduct("");
     } else {
-      setRefSlots((s) => [...s, slot]);
+      setRefSlots((s) => [...s, ...slots]);
       setPasteRef("");
     }
     setError(null);
@@ -483,11 +619,17 @@ export default function Workbench() {
 
   const onFiles = async (files: FileList | null, kind: "product" | "reference") => {
     if (!files?.length) return;
+    const fileItems = Array.from(files);
+    const available = getAvailableUploadSlots(kind);
+    if (fileItems.length > available) {
+      setError(`本次最多还能上传 ${available} 张。${uploadLimitLabel(kind)}`);
+      return;
+    }
     setBusy(true);
     setError(null);
     setUploadHint(null);
     try {
-      for (const file of Array.from(files)) {
+      for (const file of fileItems) {
         const fd = new FormData();
         fd.set("file", file);
         const r = await fetch("/api/upload", { method: "POST", body: fd });
@@ -575,8 +717,18 @@ export default function Workbench() {
       setError(
         workbenchId === "story-set"
           ? "请至少添加一张产品图（用于保持套图中的产品一致性）。"
+          : skuBackgroundWorkbench
+            ? "请至少添加一张 SKU 产品图（每张 SKU 会生成 1 个换背景任务）。"
           : "请至少添加一张产品图（用于保持产品一致性）。"
       );
+      return;
+    }
+    if (skuBackgroundWorkbench && refSlots.length === 0) {
+      setError("请至少添加一张背景图。");
+      return;
+    }
+    if (skuBackgroundWorkbench && productSlots.length > 10) {
+      setError("SKU 产品图最多 10 张（每张生成 1 个任务）。");
       return;
     }
     if (inputCount > 16) {
@@ -584,14 +736,15 @@ export default function Workbench() {
         productWorkbench
           ? workbenchId === "story-set"
             ? "产品图与套图参考合计最多 16 张。"
-            : "产品图与参考图合计最多 16 张。"
+            : skuBackgroundWorkbench
+              ? "SKU 产品图与背景图合计最多 16 张。"
+              : "产品图与参考图合计最多 16 张。"
           : "参考图最多 16 张。"
       );
       return;
     }
     const n = Math.min(10, Math.max(1, Math.floor(imageCount)));
     setBusy(true);
-    setBatchOutputs(null);
     try {
       const r = await fetch("/api/jobs", {
         method: "POST",
@@ -609,6 +762,8 @@ export default function Workbench() {
         }),
       });
       const j = (await r.json()) as {
+        batchId?: string;
+        imageCount?: number;
         jobs?: { id: string; taskId: string }[];
         error?: string;
         partial?: boolean;
@@ -622,16 +777,23 @@ export default function Workbench() {
       if (j.partial && j.error) {
         setError(j.error);
       }
-      pollStartRef.current = Date.now();
       const now = Date.now();
-      setBatchOutputs(
-        j.jobs.map((job) => ({
+      const taskCount = j.imageCount ?? j.jobs.length;
+      const project: ActiveProject = {
+        id: j.batchId ?? crypto.randomUUID(),
+        label: `${getWorkbenchLabel(workbenchId)} · ${taskCount} 张`,
+        prompt: prompt.trim(),
+        workbenchId,
+        submittedAt: now,
+        items: j.jobs.map((job) => ({
           taskId: job.taskId,
           submittedAt: now,
           state: "waiting",
           resultUrls: [],
-        }))
-      );
+        })),
+      };
+      setActiveProjects((prev) => [project, ...prev]);
+      setSelectedActiveProjectId(project.id);
       void loadHistory();
     } catch (e) {
       setError(e instanceof Error ? e.message : "创建任务失败");
@@ -640,13 +802,18 @@ export default function Workbench() {
     }
   };
 
-  const pollingKey =
-    batchOutputs?.map((b) => `${b.taskId}:${b.state}`).join("|") ?? "";
+  const pollingKey = activeProjects
+    .flatMap((project) =>
+      project.items.map((item) => `${project.id}:${item.taskId}:${item.state}`)
+    )
+    .join("|");
 
   useEffect(() => {
-    const currentBatch = batchOutputsRef.current;
-    if (!currentBatch?.length) return;
-    const allDone = currentBatch.every((b) => b.state === "success" || b.state === "fail");
+    const currentProjects = activeProjectsRef.current;
+    if (currentProjects.length === 0) return;
+    const allDone = currentProjects.every((project) =>
+      project.items.every((item) => item.state === "success" || item.state === "fail")
+    );
     if (allDone) {
       void loadHistory();
       return;
@@ -655,60 +822,68 @@ export default function Workbench() {
     let cancelled = false;
 
     const tick = async () => {
-      if (pollStartRef.current && Date.now() - pollStartRef.current > TIMEOUT_MS) {
-        setError("轮询超时（15 分钟），请稍后在历史记录中查看任务状态。");
-        setBatchOutputs(null);
-        return;
-      }
-      const snapshot = batchOutputsRef.current;
-      if (!snapshot?.length) return;
+      const snapshot = activeProjectsRef.current;
+      if (snapshot.length === 0) return;
 
       const next = await Promise.all(
-        snapshot.map(async (b) => {
-          if (b.state === "success" || b.state === "fail") return b;
-          const r = await fetch(`/api/jobs/${encodeURIComponent(b.taskId)}`);
-          const j = (await r.json()) as {
-            state?: string;
-            resultUrls?: string[];
-            failMsg?: string;
-            error?: string;
-            costTime?: number;
-          };
-          if (!r.ok) {
-            return {
-              ...b,
-              state: "fail",
-              failMsg: j.error || "查询任务失败",
-            };
-          }
-          const st = j.state ?? "unknown";
-          const urls = j.resultUrls ?? [];
-          const costRaw = j.costTime;
-          const costTimeMs =
-            typeof costRaw === "number" && Number.isFinite(costRaw) && costRaw > 0
-              ? costRaw
-              : null;
-          let clientElapsedMs = b.clientElapsedMs;
-          if (
-            st === "success" &&
-            clientElapsedMs == null &&
-            (costTimeMs == null || costTimeMs <= 0)
-          ) {
-            clientElapsedMs = Date.now() - b.submittedAt;
-          }
-          return {
-            ...b,
-            state: st,
-            resultUrls: urls,
-            failMsg: j.failMsg,
-            costTimeMs: costTimeMs ?? b.costTimeMs,
-            clientElapsedMs,
-          };
+        snapshot.map(async (project) => {
+          const timedOut = Date.now() - project.submittedAt > TIMEOUT_MS;
+          const items = await Promise.all(
+            project.items.map(async (b) => {
+              if (b.state === "success" || b.state === "fail") return b;
+              if (timedOut) {
+                return {
+                  ...b,
+                  state: "fail",
+                  failMsg: "轮询超时（15 分钟），请稍后在历史记录中查看任务状态。",
+                };
+              }
+              const r = await fetch(`/api/jobs/${encodeURIComponent(b.taskId)}`);
+              const j = (await r.json()) as {
+                state?: string;
+                resultUrls?: string[];
+                failMsg?: string;
+                error?: string;
+                costTime?: number;
+              };
+              if (!r.ok) {
+                return {
+                  ...b,
+                  state: "fail",
+                  failMsg: j.error || "查询任务失败",
+                };
+              }
+              const st = j.state ?? "unknown";
+              const urls = j.resultUrls ?? [];
+              const costRaw = j.costTime;
+              const costTimeMs =
+                typeof costRaw === "number" && Number.isFinite(costRaw) && costRaw > 0
+                  ? costRaw
+                  : null;
+              let clientElapsedMs = b.clientElapsedMs;
+              if (
+                st === "success" &&
+                clientElapsedMs == null &&
+                (costTimeMs == null || costTimeMs <= 0)
+              ) {
+                clientElapsedMs = Date.now() - b.submittedAt;
+              }
+              return {
+                ...b,
+                state: st,
+                resultUrls: urls,
+                failMsg: j.failMsg,
+                costTimeMs: costTimeMs ?? b.costTimeMs,
+                clientElapsedMs,
+              };
+            })
+          );
+          return { ...project, items };
         })
       );
 
       if (!cancelled) {
-        setBatchOutputs(next);
+        setActiveProjects(next);
       }
     };
 
@@ -718,7 +893,7 @@ export default function Workbench() {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [pollingKey, loadHistory, batchOutputCount]);
+  }, [pollingKey, loadHistory, activeTaskCount]);
 
   const applyHistoryProject = (project: HistoryProject) => {
     const rows = sortProjectRows(project.rows);
@@ -735,8 +910,14 @@ export default function Workbench() {
     const { product, reference } = parseInputPayload(g.input_urls);
     setProductSlots(product.map((url) => ({ id: crypto.randomUUID(), url })));
     setRefSlots(reference.map((url) => ({ id: crypto.randomUUID(), url })));
-    setBatchOutputs(
-      rows.map((row) => {
+    const submittedAt = Math.min(...rows.map((row) => row.created_at));
+    const projectPreview: ActiveProject = {
+      id: project.key,
+      label: `${getWorkbenchLabel(project.workbenchId)} · 历史项目`,
+      prompt: project.prompt,
+      workbenchId: project.workbenchId,
+      submittedAt,
+      items: rows.map((row) => {
         const elapsed =
           row.state === "success" && row.updated_at > row.created_at
             ? row.updated_at - row.created_at
@@ -750,8 +931,13 @@ export default function Workbench() {
           costTimeMs: null,
           clientElapsedMs: elapsed,
         };
-      })
-    );
+      }),
+    };
+    setActiveProjects((prev) => [
+      projectPreview,
+      ...prev.filter((item) => item.id !== projectPreview.id),
+    ]);
+    setSelectedActiveProjectId(projectPreview.id);
     setError(null);
     setDownloadMessage(null);
   };
@@ -841,7 +1027,9 @@ export default function Workbench() {
               {workbenchId === "story-set"
                 ? "两栏分别上传：左侧为产品图（保持整套图产品一致），右侧为套图参考（建议放入主图、场景图、特写图、包装图、使用图、氛围图等）。均支持多选文件与 URL。"
                 : workbenchId === "etsy"
-                  ? "两栏分别上传：左侧为产品图（保持产品一致，适合 Etsy 展示），右侧为参考图（仅参考氛围、光影、风格与摆放）。均支持多选文件与 URL。"
+                    ? "两栏分别上传：左侧为产品图（保持产品一致，适合 Etsy 展示），右侧为参考图（仅参考氛围、光影、风格与摆放）。均支持多选文件与 URL。"
+                  : skuBackgroundWorkbench
+                    ? "两栏分别上传：左侧为 SKU 产品图（每张会生成 1 个任务），右侧为背景图（保留场景、光影、透视与氛围，并替换原背景产品；避免悬空手、断手和 AI 感人体）。均支持多选文件与 URL。"
                   : "可上传参考图，也可以只填写 Prompt。支持多选文件与 URL。"}
               {uploadIntro}
               {!kieKeyConfigured && (
@@ -873,6 +1061,8 @@ export default function Workbench() {
                 <p className="mt-0.5 text-[10px] leading-snug text-ink-muted">
                   {workbenchId === "story-set"
                     ? "保持整套图中的产品主体、材质、颜色与细节一致。"
+                    : skuBackgroundWorkbench
+                      ? "每张 SKU 产品图会单独生成，保持当前 SKU 的形状、材质、颜色、标识与比例；不要凭空生成悬空手或遮挡产品的承托物。"
                     : "保持产品一致性，用于生成 Etsy 风格产品展示图。"}
                 </p>
                 <div
@@ -934,22 +1124,23 @@ export default function Workbench() {
                     }}
                   />
                   <div className="pointer-events-none px-2 py-6 text-center text-[10px] text-ink-muted">
-                    拖拽或点击上传产品图
+                    拖拽或点击批量上传产品图
                   </div>
                 </div>
-                <div className="mt-2 flex gap-1">
-                  <input
+                <div className="mt-2 flex items-start gap-1">
+                  <textarea
                     value={pasteProduct}
                     onChange={(e) => setPasteProduct(e.target.value)}
-                    placeholder="图片 URL"
-                    className="min-w-0 flex-1 rounded-md border border-canvas-border px-2 py-1 text-xs outline-none ring-accent focus:ring-2"
+                    rows={2}
+                    placeholder="图片 URL，可一行一个或批量粘贴多个"
+                    className="min-w-0 flex-1 resize-y rounded-md border border-canvas-border px-2 py-1 text-xs outline-none ring-accent focus:ring-2"
                   />
                   <button
                     type="button"
-                    onClick={() => addUrl("product")}
-                    className="shrink-0 rounded-md bg-accent px-2 py-1 text-xs font-medium text-white hover:bg-accent-hover"
+                    onClick={() => addUrls("product")}
+                    className="shrink-0 rounded-md bg-accent px-2 py-1.5 text-xs font-medium text-white hover:bg-accent-hover"
                   >
-                    添加
+                    批量添加
                   </button>
                 </div>
                 <ul className="mt-2 max-h-40 space-y-1.5 overflow-auto">
@@ -982,6 +1173,8 @@ export default function Workbench() {
                 <p className="mt-0.5 text-[10px] leading-snug text-ink-muted">
                   {workbenchId === "story-set"
                     ? "建议放入主图、场景图、特写图、包装图、使用图与氛围图，用来统一故事与视觉调性。"
+                    : skuBackgroundWorkbench
+                      ? "作为要套用的背景场景；会尽量保留构图、光线、透视、接触阴影与商业氛围。"
                     : workbenchId === "etsy"
                       ? "参考氛围、光影、风格与摆放；不替代产品本身。"
                       : "可选。上传后会和 Prompt 一起作为生成参考。"}
@@ -1046,23 +1239,26 @@ export default function Workbench() {
                   />
                   <div className="pointer-events-none px-2 py-6 text-center text-[10px] text-ink-muted">
                     {workbenchId === "story-set"
-                      ? "拖拽或点击上传套图参考"
-                      : "拖拽或点击上传参考图"}
+                      ? "拖拽或点击批量上传套图参考"
+                      : skuBackgroundWorkbench
+                        ? "拖拽或点击批量上传背景图"
+                      : "拖拽或点击批量上传参考图"}
                   </div>
                 </div>
-                <div className="mt-2 flex gap-1">
-                  <input
+                <div className="mt-2 flex items-start gap-1">
+                  <textarea
                     value={pasteRef}
                     onChange={(e) => setPasteRef(e.target.value)}
-                    placeholder="图片 URL"
-                    className="min-w-0 flex-1 rounded-md border border-canvas-border px-2 py-1 text-xs outline-none ring-accent focus:ring-2"
+                    rows={2}
+                    placeholder="图片 URL，可一行一个或批量粘贴多个"
+                    className="min-w-0 flex-1 resize-y rounded-md border border-canvas-border px-2 py-1 text-xs outline-none ring-accent focus:ring-2"
                   />
                   <button
                     type="button"
-                    onClick={() => addUrl("reference")}
-                    className="shrink-0 rounded-md bg-accent px-2 py-1 text-xs font-medium text-white hover:bg-accent-hover"
+                    onClick={() => addUrls("reference")}
+                    className="shrink-0 rounded-md bg-accent px-2 py-1.5 text-xs font-medium text-white hover:bg-accent-hover"
                   >
-                    添加
+                    批量添加
                   </button>
                 </div>
                 <ul className="mt-2 max-h-40 space-y-1.5 overflow-auto">
@@ -1118,23 +1314,31 @@ export default function Workbench() {
             <p className="mt-0.5 text-[10px] text-ink-faint">
               {workbenchId === "story-set"
                 ? "套图默认 9 张，可临时调整；将按顺序创建多个独立 Kie 任务，最多 10。"
+                : skuBackgroundWorkbench
+                  ? "SKU 换背景按产品图数量自动生成：每张 SKU 产品图 1 个任务，最多 10。"
                 : "将按顺序创建多个独立 Kie 任务（每张 1 次调用），最多 10。"}
             </p>
-            <input
-              type="number"
-              min={1}
-              max={10}
-              value={imageCount}
-              onChange={(e) => {
-                const v = Number(e.target.value);
-                if (!Number.isFinite(v)) return;
-                setImageCount(Math.min(10, Math.max(1, Math.floor(v))));
-              }}
-              onBlur={() =>
-                setImageCount((c) => Math.min(10, Math.max(1, Math.floor(c)) || 1))
-              }
-              className="mt-1 w-28 rounded-md border border-canvas-border px-2 py-2 text-sm outline-none ring-accent focus:ring-2"
-            />
+            {skuBackgroundWorkbench ? (
+              <div className="mt-1 w-28 rounded-md border border-canvas-border bg-canvas-muted px-2 py-2 text-sm text-ink">
+                {productSlots.length || 0}
+              </div>
+            ) : (
+              <input
+                type="number"
+                min={1}
+                max={10}
+                value={imageCount}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  if (!Number.isFinite(v)) return;
+                  setImageCount(Math.min(10, Math.max(1, Math.floor(v))));
+                }}
+                onBlur={() =>
+                  setImageCount((c) => Math.min(10, Math.max(1, Math.floor(c)) || 1))
+                }
+                className="mt-1 w-28 rounded-md border border-canvas-border px-2 py-2 text-sm outline-none ring-accent focus:ring-2"
+              />
+            )}
             <div className="mt-4 grid grid-cols-2 gap-3">
               <div>
                 <label className="text-xs font-medium text-ink-muted">宽高比</label>
@@ -1186,70 +1390,124 @@ export default function Workbench() {
           <div className="flex h-full min-h-[320px] flex-col rounded-xl border border-canvas-border bg-white p-4 shadow-panel">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h2 className="text-sm font-semibold text-ink">结果</h2>
-              {currentResultUrls.length > 1 && (
-                <button
-                  type="button"
-                  disabled={downloadKeys.has("current-results")}
-                  onClick={() => void saveImages(currentResultUrls, "current-results")}
-                  className="rounded-md border border-canvas-border bg-white px-2 py-1 text-xs font-medium text-ink hover:bg-canvas-muted disabled:opacity-50"
-                >
-                  {downloadKeys.has("current-results") ? "保存中…" : "全部下载"}
-                </button>
-              )}
+              <div className="flex flex-wrap items-center gap-2">
+                {activeProjects.length > 1 && (
+                  <select
+                    value={selectedActiveProject?.id ?? ""}
+                    onChange={(e) => setSelectedActiveProjectId(e.target.value)}
+                    className="max-w-[220px] rounded-md border border-canvas-border bg-white px-2 py-1 text-xs text-ink outline-none ring-accent focus:ring-2"
+                  >
+                    {activeProjects.map((project) => {
+                      const doneCount = project.items.filter(
+                        (item) => item.state === "success" || item.state === "fail"
+                      ).length;
+                      return (
+                        <option key={project.id} value={project.id}>
+                          {project.label} · {doneCount}/{project.items.length}
+                        </option>
+                      );
+                    })}
+                  </select>
+                )}
+                {currentResultUrls.length > 1 && (
+                  <button
+                    type="button"
+                    disabled={downloadKeys.has(`project:${selectedActiveProject?.id ?? "current"}`)}
+                    onClick={() =>
+                      void saveImages(
+                        currentResultUrls,
+                        `project:${selectedActiveProject?.id ?? "current"}`
+                      )
+                    }
+                    className="rounded-md border border-canvas-border bg-white px-2 py-1 text-xs font-medium text-ink hover:bg-canvas-muted disabled:opacity-50"
+                  >
+                    {downloadKeys.has(`project:${selectedActiveProject?.id ?? "current"}`)
+                      ? "保存中…"
+                      : "下载本项目"}
+                  </button>
+                )}
+              </div>
             </div>
             {downloadMessage && (
               <p className="mt-2 rounded-md bg-emerald-50 px-2 py-2 text-xs text-emerald-700">
                 {downloadMessage}
               </p>
             )}
-            {!batchOutputs && (
-              <p className="mt-4 text-sm text-ink-muted">提交任务后将在此显示状态与预览。</p>
+            {activeProjects.length === 0 && (
+              <p className="mt-4 text-sm text-ink-muted">
+                提交任务后将在此显示状态与预览；可以连续提交多个项目同时生成。
+              </p>
             )}
-            {batchOutputs && (
+            {selectedActiveProject && (
               <div className="mt-3 flex flex-1 flex-col gap-4 overflow-hidden">
-                {batchOutputs.map((item, idx) => (
+                {(() => {
+                  const project = selectedActiveProject;
+                  const doneCount = project.items.filter(
+                    (item) => item.state === "success" || item.state === "fail"
+                  ).length;
+                  return (
                   <div
-                    key={item.taskId}
+                    key={project.id}
                     className="rounded-lg border border-canvas-border bg-canvas p-3"
                   >
-                    <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
-                      <span className="font-medium text-ink">第 {idx + 1} 张</span>
-                      <span className="rounded-full bg-canvas-muted px-2 py-0.5 font-medium text-ink">
-                        {item.state}
-                      </span>
-                      {item.failMsg && <span className="text-red-600">{item.failMsg}</span>}
+                    <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2 text-xs">
+                          <span className="font-medium text-ink">{project.label}</span>
+                          <span className="rounded-full bg-canvas-muted px-2 py-0.5 font-medium text-ink">
+                            {doneCount}/{project.items.length}
+                          </span>
+                        </div>
+                        <p className="mt-1 line-clamp-2 text-[11px] text-ink-muted">
+                          {project.prompt}
+                        </p>
+                      </div>
                     </div>
-                    <div className="flex flex-wrap gap-3">
-                      {item.resultUrls.length === 0 && item.state !== "success" && (
-                        <p className="text-xs text-ink-muted">生成中…</p>
-                      )}
-                      {item.resultUrls.map((u) => {
-                        const showMs = item.costTimeMs ?? item.clientElapsedMs;
-                        const downloadKey = `image:${u}`;
-                        return (
-                          <figure
-                            key={u}
-                            className="flex max-w-full flex-col gap-2 rounded-md border border-canvas-border bg-white p-2"
-                          >
-                            {/* eslint-disable-next-line @next/next/no-img-element */}
-                            <img src={u} alt="" className="max-h-[360px] rounded-md object-contain" />
-                            <div className="flex flex-wrap items-center gap-2 text-xs text-ink-muted">
-                              <span>生成耗时 {formatGenDuration(showMs)}</span>
-                              <button
-                                type="button"
-                                disabled={downloadKeys.has(downloadKey)}
-                                onClick={() => void saveImages([u], downloadKey)}
-                                className="inline-flex items-center justify-center rounded-md border border-canvas-border bg-white px-2 py-1 font-medium text-ink hover:bg-canvas-muted"
-                              >
-                                {downloadKeys.has(downloadKey) ? "保存中…" : "一键下载"}
-                              </button>
+                    <div className="flex flex-col gap-3">
+                      {project.items.map((item, idx) => (
+                        <div key={item.taskId}>
+                          <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
+                            <span className="font-medium text-ink">第 {idx + 1} 张</span>
+                            <span className="rounded-full bg-canvas-muted px-2 py-0.5 font-medium text-ink">
+                              {item.state}
+                            </span>
+                            {item.failMsg && <span className="text-red-600">{item.failMsg}</span>}
+                          </div>
+                          <div className="flex flex-wrap gap-3">
+                            {item.resultUrls.length === 0 && item.state !== "success" && (
+                              <p className="text-xs text-ink-muted">生成中…</p>
+                            )}
+                            {item.resultUrls.map((u) => {
+                              const showMs = item.costTimeMs ?? item.clientElapsedMs;
+                              const downloadKey = `image:${u}`;
+                              return (
+                                <figure
+                                  key={u}
+                                  className="flex max-w-full flex-col gap-2 rounded-md border border-canvas-border bg-white p-2"
+                                >
+                                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                                  <img src={u} alt="" className="max-h-[360px] rounded-md object-contain" />
+                                  <div className="flex flex-wrap items-center gap-2 text-xs text-ink-muted">
+                                    <span>生成耗时 {formatGenDuration(showMs)}</span>
+                                    <button
+                                      type="button"
+                                      disabled={downloadKeys.has(downloadKey)}
+                                      onClick={() => void saveImages([u], downloadKey)}
+                                      className="inline-flex items-center justify-center rounded-md border border-canvas-border bg-white px-2 py-1 font-medium text-ink hover:bg-canvas-muted"
+                                    >
+                                      {downloadKeys.has(downloadKey) ? "保存中…" : "一键下载"}
+                                    </button>
+                                  </div>
+                                </figure>
+                              );
+                            })}
                             </div>
-                          </figure>
-                        );
-                      })}
+                          </div>
+                        ))}
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })()}
               </div>
             )}
           </div>
@@ -1258,7 +1516,7 @@ export default function Workbench() {
 
       <section>
         <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-ink">团队历史</h2>
+          <h2 className="text-sm font-semibold text-ink">图形生成历史</h2>
           <button
             type="button"
             onClick={() => void loadHistory()}

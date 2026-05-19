@@ -1,6 +1,6 @@
 {
   "name": "kie-image-workbench",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Kie internal image workbench",
   "author": "Internal",
@@ -20,17 +20,24 @@
     "directories": {
       "output": "release"
     },
-    "files": ["electron/**/*", "package.json"],
+    "files": [
+      "electron/**/*",
+      "package.json"
+    ],
     "extraResources": [
       {
         "from": "dist-standalone",
         "to": "server",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "win": {
       "signAndEditExecutable": false,
-      "target": ["portable"],
+      "target": [
+        "portable"
+      ],
       "artifactName": "${productName}-${version}-portable.${ext}"
     }
   },

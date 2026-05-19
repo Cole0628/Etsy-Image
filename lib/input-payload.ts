@@ -71,10 +71,34 @@ export function buildAugmentedPrompt(params: {
   } = params;
   const pc = Math.max(0, productCount);
   const rc = Math.max(0, referenceCount);
+  if (workbenchId === "default") {
+    return userPrompt.trim();
+  }
   const blocks: string[] = [];
   const definition = workbenchDefinition?.trim();
   if (definition) {
     blocks.push(`[Workbench definition]\n${definition}`);
+  }
+
+  blocks.push(
+    `[Global hard requirement]\n` +
+      `Use a realistic photography style. The output must look like a real camera photograph with physically plausible lighting, shadows, perspective, depth of field, materials, texture, color, and lens behavior. Avoid illustration, CGI, render, cartoon, plastic-smooth surfaces, overprocessed AI aesthetics, impossible anatomy, impossible object contact, fake reflections, and surreal compositions unless the user explicitly asks for a non-photographic style.`
+  );
+
+  if (workbenchId === "sku-background") {
+    const backgroundLine =
+      rc > 0
+        ? `• Images ${pc + 1}..${pc + rc}: BACKGROUND references. Preserve the background scene, composition, lighting direction, perspective, surface contact, shadows, and mood. If a background image contains another product, replace that product with the current SKU product instead of keeping both products.`
+        : `• No background image was supplied. Create a clean commercial background from the workbench definition and user brief.`;
+    blocks.push(
+      `[Image roles — order matches input_urls exactly]\n` +
+        `• Image 1: CURRENT SKU product photo. Keep this SKU's identity, shape, material, color, markings, and proportions accurate.\n` +
+        backgroundLine
+    );
+    blocks.push(
+      `[SKU background replacement]\n` +
+        `Create one finished SKU image for product ${variantIndex + 1} of ${variantTotal}. Place the current SKU naturally into the chosen background. Match the background's light direction, shadow softness, perspective, scale, contact shadows, reflections, depth of field, and color temperature. Keep the product identity consistent and preserve crisp high-definition material detail, texture, edges, markings, color, transparency, and proportions. The product must be the clear visual focus, fully visible, unobstructed, and not hidden behind hands, props, text, foreground objects, blur, glare, or crop. Do not invent hands, arms, fingers, people, floating limbs, disconnected wrists, hovering props, or other AI-looking support objects. If the source product photo includes a hand or holder, either remove it cleanly while keeping the product intact, or keep it only when it remains anatomically natural, connected, physically plausible, properly lit, and clearly in contact with the product and scene. Avoid surreal floating-hand compositions; the product should feel grounded in the background with believable contact, support, and shadow logic. Remove or replace any existing product in the background image, while preserving the background environment and commercial styling.`
+    );
   }
 
   if (workbenchId === "etsy" || workbenchId === "story-set") {
@@ -120,6 +144,8 @@ export function buildAugmentedPrompt(params: {
       const instruction =
         workbenchId === "etsy"
           ? "Create a meaningfully different marketing shot while preserving the same product."
+          : workbenchId === "sku-background"
+            ? "Use the current SKU product for this output; do not mix it with other SKU products."
           : "Create a meaningfully different output while respecting the workbench definition and user brief.";
       blocks.push(
         `[Variation] This is output ${variantIndex + 1} of ${variantTotal}. ${instruction}`

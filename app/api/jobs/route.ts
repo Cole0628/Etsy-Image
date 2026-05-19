@@ -107,6 +107,20 @@ export async function POST(request: Request) {
     );
   }
 
+  if (workbenchId === "sku-background" && referenceUrls.length === 0) {
+    return NextResponse.json(
+      { error: "请至少上传一张背景图（reference_urls）" },
+      { status: 400 }
+    );
+  }
+
+  if (workbenchId === "sku-background" && productUrls.length > MAX_BATCH) {
+    return NextResponse.json(
+      { error: `SKU 产品图最多 ${MAX_BATCH} 张（每张生成 1 个任务）` },
+      { status: 400 }
+    );
+  }
+
   const merged = [...productUrls, ...referenceUrls];
   if (merged.length > MAX_INPUTS) {
     return NextResponse.json(
@@ -117,12 +131,14 @@ export async function POST(request: Request) {
 
   const errP = validateUrls("产品图", productUrls);
   if (errP) return NextResponse.json({ error: errP }, { status: 400 });
-  const errR = validateUrls("参考图", referenceUrls);
+  const errR = validateUrls(workbenchId === "sku-background" ? "背景图" : "参考图", referenceUrls);
   if (errR) return NextResponse.json({ error: errR }, { status: 400 });
 
   let imageCount = Number(body.image_count);
   if (!Number.isFinite(imageCount) || imageCount < 1) imageCount = 1;
   imageCount = Math.min(MAX_BATCH, Math.floor(imageCount));
+  const batchSize =
+    workbenchId === "sku-background" ? productUrls.length : imageCount;
 
   const modelRow = getModelById(body.modelId);
   if (!modelRow || !modelRow.enabled) {
@@ -141,26 +157,27 @@ export async function POST(request: Request) {
 
   const inputUrlsJson = buildInputUrlsStorage(productUrls, referenceUrls);
   const batchId = randomUUID();
-  const pc = productUrls.length;
-  const rc = referenceUrls.length;
   const jobs: { id: string; taskId: string }[] = [];
 
-  for (let i = 0; i < imageCount; i++) {
+  for (let i = 0; i < batchSize; i++) {
+    const taskProductUrls =
+      workbenchId === "sku-background" ? [productUrls[i]] : productUrls;
+    const taskMerged = [...taskProductUrls, ...referenceUrls];
     const fullPrompt = buildAugmentedPrompt({
       userPrompt: body.prompt.trim(),
       workbenchId,
       workbenchDefinition,
-      productCount: pc,
-      referenceCount: rc,
+      productCount: taskProductUrls.length,
+      referenceCount: referenceUrls.length,
       variantIndex: i,
-      variantTotal: imageCount,
+      variantTotal: batchSize,
     });
 
     const kieBody: CreateImageTaskInput = {
       model: modelRow.kie_model,
       input: {
         prompt: fullPrompt,
-        input_urls: merged,
+        input_urls: taskMerged,
         aspect_ratio: aspect,
         resolution,
       },
@@ -200,9 +217,9 @@ export async function POST(request: Request) {
       credits: null,
       created_at: now,
       updated_at: now,
-      batch_id: imageCount > 1 ? batchId : null,
-      batch_index: imageCount > 1 ? i : null,
-      batch_size: imageCount > 1 ? imageCount : null,
+      batch_id: batchSize > 1 ? batchId : null,
+      batch_index: batchSize > 1 ? i : null,
+      batch_size: batchSize > 1 ? batchSize : null,
       workbench_id: workbenchId,
       workbench_definition: workbenchDefinition || null,
     });
@@ -213,6 +230,6 @@ export async function POST(request: Request) {
   return NextResponse.json({
     batchId,
     jobs,
-    imageCount,
+    imageCount: batchSize,
   });
 }
