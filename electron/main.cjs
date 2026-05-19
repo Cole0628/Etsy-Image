@@ -4,6 +4,7 @@ const { spawn } = require("child_process");
 const http = require("http");
 
 const PORT = process.env.KIE_WORKBENCH_PORT || "38477";
+const DEV_URL = process.env.KIE_WORKBENCH_DEV_URL || "http://127.0.0.1:3300";
 let serverProc = null;
 
 function serverRoot() {
@@ -81,7 +82,7 @@ function createWindow(url) {
 
 app.whenReady().then(() => {
   if (!app.isPackaged) {
-    createWindow("http://127.0.0.1:3000");
+    createWindow(DEV_URL);
     return;
   }
   startServer();

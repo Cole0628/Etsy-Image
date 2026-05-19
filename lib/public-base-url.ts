@@ -4,7 +4,7 @@ export function getPublicBaseUrl(request: Request): string {
   if (trimmed) return trimmed;
   const host =
     request.headers.get("x-forwarded-host") ?? request.headers.get("host");
-  if (!host) return "http://localhost:3000";
+  if (!host) return "http://localhost:3300";
   const lower = host.toLowerCase();
   const isLocalHost =
     lower === "localhost" ||

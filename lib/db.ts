@@ -25,6 +25,8 @@ export type GenerationRow = {
   batch_id?: string | null;
   batch_index?: number | null;
   batch_size?: number | null;
+  workbench_id?: string | null;
+  workbench_definition?: string | null;
 };
 export type ModelRow = {
   id: string;
@@ -41,20 +43,48 @@ type AppState = {
   models: ModelRow[];
 };
 
+const BUILT_IN_MODELS: ModelRow[] = [
+  {
+    id: "gpt-image-2-image-to-image",
+    label: "GPT Image 2 · Image to Image",
+    enabled: 1,
+    sort_order: 0,
+    is_default: 1,
+    kie_model: "gpt-image-2-image-to-image",
+  },
+  {
+    id: "google-nano-banana",
+    label: "Nano Banana · Gemini 2.5 Flash Image",
+    enabled: 1,
+    sort_order: 10,
+    is_default: 0,
+    kie_model: "google/nano-banana",
+  },
+];
+
+function cloneBuiltInModels(): ModelRow[] {
+  return BUILT_IN_MODELS.map((model) => ({ ...model }));
+}
+
+function ensureBuiltInModels(s: AppState): boolean {
+  let changed = false;
+  for (const model of BUILT_IN_MODELS) {
+    if (s.models.some((item) => item.id === model.id)) continue;
+    s.models.push({ ...model, is_default: 0 });
+    changed = true;
+  }
+  if (!s.models.some((model) => model.is_default === 1) && s.models.length > 0) {
+    s.models[0].is_default = 1;
+    changed = true;
+  }
+  return changed;
+}
+
 function defaultState(): AppState {
   return {
     settings: {},
     generations: [],
-    models: [
-      {
-        id: "gpt-image-2-image-to-image",
-        label: "GPT Image 2 · Image to Image",
-        enabled: 1,
-        sort_order: 0,
-        is_default: 1,
-        kie_model: "gpt-image-2-image-to-image",
-      },
-    ],
+    models: cloneBuiltInModels(),
   };
 }
 
@@ -68,12 +98,14 @@ function readState(): AppState {
     const raw = fs.readFileSync(STORE_PATH, "utf-8");
     const parsed = JSON.parse(raw) as AppState;
     if (!Array.isArray(parsed.generations)) parsed.generations = [];
-    if (!Array.isArray(parsed.models)) parsed.models = defaultState().models;
+    if (!Array.isArray(parsed.models)) parsed.models = cloneBuiltInModels();
     if (!parsed.settings || typeof parsed.settings !== "object") {
       parsed.settings = {};
     }
     if (parsed.models.length === 0) {
-      parsed.models = defaultState().models;
+      parsed.models = cloneBuiltInModels();
+      writeState(parsed);
+    } else if (ensureBuiltInModels(parsed)) {
       writeState(parsed);
     }
     return parsed;

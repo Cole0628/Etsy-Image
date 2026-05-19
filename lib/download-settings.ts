@@ -1,11 +1,13 @@
 import fs from "fs/promises";
+import os from "os";
 import path from "path";
 import { getSetting, setSetting } from "@/lib/db";
 
 const KEY_DOWNLOAD_DIR = "download_dir";
 
 export function getDefaultDownloadDir(): string {
-  return path.join(process.cwd(), "Output");
+  const home = os.homedir();
+  return home ? path.join(home, "Downloads") : path.join(process.cwd(), "Output");
 }
 
 function normalizeDownloadDir(raw: string | null | undefined): string {

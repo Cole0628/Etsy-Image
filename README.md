@@ -24,7 +24,7 @@ npm install
 npm run dev
 ```
 
-浏览器打开 `http://localhost:3000`。
+浏览器打开 `http://localhost:3300`。
 
 开发模式下数据默认在项目目录 `data/store.json`。
 
@@ -64,7 +64,7 @@ npm run desktop:pack
 npm run desktop:dev
 ```
 
-会先起 `next dev`（3000），再打开 Electron 指向该地址。
+会先起 `next dev`（3300），再打开 Electron 指向该地址。
 
 ### 5. 不打包 exe、只要「绿色文件夹 + 脚本」（可选）
 

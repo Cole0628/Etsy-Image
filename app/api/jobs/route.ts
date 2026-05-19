@@ -12,6 +12,11 @@ import {
   type CreateImageTaskInput,
 } from "@/lib/kie/client";
 import { getEffectiveKieApiKey } from "@/lib/settings";
+import {
+  isWorkbenchId,
+  LEGACY_WORKBENCH_ID,
+  type WorkbenchId,
+} from "@/lib/workbenches";
 
 export const dynamic = "force-dynamic";
 
@@ -23,6 +28,8 @@ const MAX_BATCH = 10;
 type Body = {
   prompt: string;
   modelId: string;
+  workbench_id?: string;
+  workbench_definition?: string;
   aspect_ratio?: string;
   resolution?: string;
   /** 新版：产品图（至少 1 张） */
@@ -68,13 +75,32 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "prompt 必填" }, { status: 400 });
   }
 
+  if (body.workbench_id != null && !isWorkbenchId(body.workbench_id)) {
+    return NextResponse.json({ error: "未知工作台" }, { status: 400 });
+  }
+  const workbenchId: WorkbenchId =
+    body.workbench_id == null ? LEGACY_WORKBENCH_ID : body.workbench_id;
+  const workbenchDefinition =
+    typeof body.workbench_definition === "string"
+      ? body.workbench_definition.trim()
+      : "";
+
   let productUrls = normalizeUrlList(body.product_urls);
-  const referenceUrls = normalizeUrlList(body.reference_urls);
-  if (productUrls.length === 0 && normalizeUrlList(body.input_urls).length > 0) {
-    productUrls = normalizeUrlList(body.input_urls);
+  let referenceUrls = normalizeUrlList(body.reference_urls);
+  const legacyInputUrls = normalizeUrlList(body.input_urls);
+  if (
+    productUrls.length === 0 &&
+    referenceUrls.length === 0 &&
+    legacyInputUrls.length > 0
+  ) {
+    if (workbenchId === "default") {
+      referenceUrls = legacyInputUrls;
+    } else {
+      productUrls = legacyInputUrls;
+    }
   }
 
-  if (productUrls.length === 0) {
+  if (workbenchId !== "default" && productUrls.length === 0) {
     return NextResponse.json(
       { error: "请至少上传一张产品图（product_urls）" },
       { status: 400 }
@@ -122,6 +148,8 @@ export async function POST(request: Request) {
   for (let i = 0; i < imageCount; i++) {
     const fullPrompt = buildAugmentedPrompt({
       userPrompt: body.prompt.trim(),
+      workbenchId,
+      workbenchDefinition,
       productCount: pc,
       referenceCount: rc,
       variantIndex: i,
@@ -175,6 +203,8 @@ export async function POST(request: Request) {
       batch_id: imageCount > 1 ? batchId : null,
       batch_index: imageCount > 1 ? i : null,
       batch_size: imageCount > 1 ? imageCount : null,
+      workbench_id: workbenchId,
+      workbench_definition: workbenchDefinition || null,
     });
 
     jobs.push({ id, taskId: created.data.taskId });

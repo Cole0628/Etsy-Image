@@ -3,6 +3,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isAllowedInputImageUrl } from "@/lib/input-url";
 import { parseInputPayload } from "@/lib/input-payload";
+import {
+  EMPTY_WORKBENCH_DEFINITIONS,
+  getWorkbenchLabel,
+  isWorkbenchId,
+  WORKBENCH_OPTIONS,
+  type WorkbenchId,
+} from "@/lib/workbenches";
 
 type ModelRow = {
   id: string;
@@ -31,6 +38,8 @@ type Generation = {
   batch_id?: string | null;
   batch_index?: number | null;
   batch_size?: number | null;
+  workbench_id?: string | null;
+  workbench_definition?: string | null;
 };
 
 type ImageSlot = {
@@ -58,16 +67,130 @@ type HistoryProject = {
   rows: Generation[];
   prompt: string;
   model: string;
+  workbenchId: WorkbenchId;
   state: string;
   createdAt: number;
   resultUrls: string[];
 };
 
+type WorkbenchSettingsItem = {
+  id: WorkbenchId;
+  label: string;
+  definition: string;
+};
+
+type WorkbenchDraft = {
+  v: 1;
+  workbenchId: WorkbenchId;
+  modelId: string;
+  prompt: string;
+  aspect: string;
+  resolution: string;
+  imageCount: number;
+  productSlots: ImageSlot[];
+  refSlots: ImageSlot[];
+  pasteProduct: string;
+  pasteRef: string;
+  batchOutputs: BatchOutputItem[] | null;
+  pollStartAt: number | null;
+};
+
 const ASPECT_OPTIONS = ["auto", "1:1", "9:16", "16:9", "4:3", "3:4"] as const;
 const RES_OPTIONS = ["1K", "2K", "4K"] as const;
+const STORY_SET_DEFAULT_COUNT = 9;
+const WORKBENCH_DRAFT_KEY = "kie-workbench:draft:v1";
 
 const POLL_MS = 3000;
 const TIMEOUT_MS = 15 * 60 * 1000;
+
+function isProductWorkbench(id: WorkbenchId): boolean {
+  return id === "etsy" || id === "story-set";
+}
+
+function normalizeImageSlots(value: unknown): ImageSlot[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter(
+      (item): item is ImageSlot =>
+        Boolean(item) &&
+        typeof item === "object" &&
+        typeof (item as ImageSlot).id === "string" &&
+        typeof (item as ImageSlot).url === "string"
+    )
+    .map((item) => ({ id: item.id, url: item.url }));
+}
+
+function normalizeBatchOutputs(value: unknown): BatchOutputItem[] | null {
+  if (!Array.isArray(value)) return null;
+  return value
+    .filter(
+      (item): item is BatchOutputItem =>
+        Boolean(item) &&
+        typeof item === "object" &&
+        typeof (item as BatchOutputItem).taskId === "string" &&
+        typeof (item as BatchOutputItem).submittedAt === "number" &&
+        typeof (item as BatchOutputItem).state === "string"
+    )
+    .map((item) => ({
+      taskId: item.taskId,
+      submittedAt: item.submittedAt,
+      state: item.state,
+      resultUrls: Array.isArray(item.resultUrls)
+        ? item.resultUrls.filter((url): url is string => typeof url === "string")
+        : [],
+      failMsg: typeof item.failMsg === "string" ? item.failMsg : undefined,
+      costTimeMs:
+        typeof item.costTimeMs === "number" && Number.isFinite(item.costTimeMs)
+          ? item.costTimeMs
+          : null,
+      clientElapsedMs:
+        typeof item.clientElapsedMs === "number" &&
+        Number.isFinite(item.clientElapsedMs)
+          ? item.clientElapsedMs
+          : null,
+    }));
+}
+
+function readWorkbenchDraft(): WorkbenchDraft | null {
+  try {
+    const raw = window.localStorage.getItem(WORKBENCH_DRAFT_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<WorkbenchDraft>;
+    if (parsed.v !== 1 || !isWorkbenchId(parsed.workbenchId)) return null;
+    const imageCount = Number(parsed.imageCount);
+    const batchOutputs = normalizeBatchOutputs(parsed.batchOutputs);
+    return {
+      v: 1,
+      workbenchId: parsed.workbenchId,
+      modelId: typeof parsed.modelId === "string" ? parsed.modelId : "",
+      prompt: typeof parsed.prompt === "string" ? parsed.prompt : "",
+      aspect:
+        typeof parsed.aspect === "string" && ASPECT_OPTIONS.includes(parsed.aspect as never)
+          ? parsed.aspect
+          : "auto",
+      resolution:
+        typeof parsed.resolution === "string" &&
+        RES_OPTIONS.includes(parsed.resolution as never)
+          ? parsed.resolution
+          : "1K",
+      imageCount: Number.isFinite(imageCount)
+        ? Math.min(10, Math.max(1, Math.floor(imageCount)))
+        : 1,
+      productSlots: normalizeImageSlots(parsed.productSlots),
+      refSlots: normalizeImageSlots(parsed.refSlots),
+      pasteProduct:
+        typeof parsed.pasteProduct === "string" ? parsed.pasteProduct : "",
+      pasteRef: typeof parsed.pasteRef === "string" ? parsed.pasteRef : "",
+      batchOutputs,
+      pollStartAt:
+        typeof parsed.pollStartAt === "number" && Number.isFinite(parsed.pollStartAt)
+          ? parsed.pollStartAt
+          : batchOutputs?.[0]?.submittedAt ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
 
 function parseResultUrls(raw: string | null): string[] {
   if (!raw) return [];
@@ -118,6 +241,9 @@ function buildHistoryProjects(rows: Generation[]): HistoryProject[] {
         rows: sorted,
         prompt: first?.prompt ?? "",
         model: first?.model ?? "",
+        workbenchId: isWorkbenchId(first?.workbench_id)
+          ? first.workbench_id
+          : "etsy",
         state: summarizeProjectState(sorted),
         createdAt: Math.min(...sorted.map((row) => row.created_at)),
         resultUrls,
@@ -134,6 +260,12 @@ export default function Workbench() {
   const [uploadHint, setUploadHint] = useState<string | null>(null);
   const [models, setModels] = useState<ModelRow[]>([]);
   const [modelId, setModelId] = useState<string>("");
+  const [workbenchId, setWorkbenchId] = useState<WorkbenchId>("default");
+  const [workbenchDefinitions, setWorkbenchDefinitions] = useState<
+    Record<WorkbenchId, string>
+  >({ ...EMPTY_WORKBENCH_DEFINITIONS });
+  const [definitionSaving, setDefinitionSaving] = useState(false);
+  const [definitionStatus, setDefinitionStatus] = useState<string | null>(null);
   const [prompt, setPrompt] = useState("");
   const [aspect, setAspect] = useState<string>("auto");
   const [resolution, setResolution] = useState<string>("1K");
@@ -156,6 +288,7 @@ export default function Workbench() {
   const dragDepthRefRef = useRef(0);
   const lastDropProductRef = useRef(0);
   const lastDropRefRef = useRef(0);
+  const draftLoadedRef = useRef(false);
 
   batchOutputsRef.current = batchOutputs;
   const batchOutputCount = batchOutputs?.length ?? 0;
@@ -187,13 +320,92 @@ export default function Workbench() {
     setHistory(j.items);
   }, []);
 
+  const loadWorkbenchSettings = useCallback(async () => {
+    const r = await fetch("/api/settings/workbench");
+    const j = (await r.json()) as { items?: WorkbenchSettingsItem[] };
+    const next = { ...EMPTY_WORKBENCH_DEFINITIONS };
+    for (const item of j.items ?? []) {
+      if (isWorkbenchId(item.id)) {
+        next[item.id] = item.definition ?? "";
+      }
+    }
+    setWorkbenchDefinitions(next);
+  }, []);
+
+  useEffect(() => {
+    const draft = readWorkbenchDraft();
+    if (draft) {
+      setWorkbenchId(draft.workbenchId);
+      setModelId(draft.modelId);
+      setPrompt(draft.prompt);
+      setAspect(draft.aspect);
+      setResolution(draft.resolution);
+      setImageCount(draft.imageCount);
+      setProductSlots(draft.productSlots);
+      setRefSlots(draft.refSlots);
+      setPasteProduct(draft.pasteProduct);
+      setPasteRef(draft.pasteRef);
+      setBatchOutputs(draft.batchOutputs);
+      pollStartRef.current = draft.pollStartAt;
+    }
+    draftLoadedRef.current = true;
+  }, []);
+
   useEffect(() => {
     void loadBootstrap();
     void loadModels();
     void loadHistory();
-  }, [loadBootstrap, loadModels, loadHistory]);
+    void loadWorkbenchSettings();
+  }, [loadBootstrap, loadModels, loadHistory, loadWorkbenchSettings]);
 
-  const mergedCount = productSlots.length + refSlots.length;
+  useEffect(() => {
+    if (!draftLoadedRef.current) return;
+    const draft: WorkbenchDraft = {
+      v: 1,
+      workbenchId,
+      modelId,
+      prompt,
+      aspect,
+      resolution,
+      imageCount,
+      productSlots,
+      refSlots,
+      pasteProduct,
+      pasteRef,
+      batchOutputs,
+      pollStartAt: pollStartRef.current,
+    };
+    try {
+      window.localStorage.setItem(WORKBENCH_DRAFT_KEY, JSON.stringify(draft));
+    } catch {
+      /* Ignore local storage quota or privacy mode failures. */
+    }
+  }, [
+    workbenchId,
+    modelId,
+    prompt,
+    aspect,
+    resolution,
+    imageCount,
+    productSlots,
+    refSlots,
+    pasteProduct,
+    pasteRef,
+    batchOutputs,
+  ]);
+
+  const productWorkbench = isProductWorkbench(workbenchId);
+  const inputCount = productWorkbench
+    ? productSlots.length + refSlots.length
+    : refSlots.length;
+  const currentWorkbenchDefinition = workbenchDefinitions[workbenchId] ?? "";
+  const promptPlaceholder =
+    workbenchId === "story-set"
+      ? "描述这套图的故事、用途、场景、情绪与必须展示的卖点……"
+      : workbenchId === "etsy"
+      ? "描述希望如何基于产品图生成展示图……"
+      : "描述你想生成的图片……";
+  const referenceLabel = workbenchId === "story-set" ? "套图参考" : "参考图";
   const currentResultUrls = useMemo(
     () => batchOutputs?.flatMap((item) => item.resultUrls) ?? [],
     [batchOutputs]
@@ -210,6 +422,45 @@ export default function Workbench() {
       }
       return next;
     });
+  };
+
+  const updateWorkbenchDefinition = (value: string) => {
+    setWorkbenchDefinitions((prev) => ({ ...prev, [workbenchId]: value }));
+    setDefinitionStatus(null);
+  };
+
+  const saveWorkbenchDefinition = async () => {
+    setDefinitionSaving(true);
+    setDefinitionStatus(null);
+    try {
+      const r = await fetch("/api/settings/workbench", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: workbenchId,
+          definition: currentWorkbenchDefinition,
+        }),
+      });
+      const j = (await r.json()) as {
+        items?: WorkbenchSettingsItem[];
+        error?: string;
+      };
+      if (!r.ok) {
+        throw new Error(j.error || "保存工作台定义失败");
+      }
+      const next = { ...EMPTY_WORKBENCH_DEFINITIONS };
+      for (const item of j.items ?? []) {
+        if (isWorkbenchId(item.id)) {
+          next[item.id] = item.definition ?? "";
+        }
+      }
+      setWorkbenchDefinitions(next);
+      setDefinitionStatus("已保存");
+    } catch (e) {
+      setDefinitionStatus(e instanceof Error ? e.message : "保存工作台定义失败");
+    } finally {
+      setDefinitionSaving(false);
+    }
   };
 
   const addUrl = (kind: "product" | "reference") => {
@@ -320,12 +571,22 @@ export default function Workbench() {
       setError("请填写 Prompt。");
       return;
     }
-    if (productSlots.length === 0) {
-      setError("请至少添加一张产品图（用于保持产品一致性）。");
+    if (productWorkbench && productSlots.length === 0) {
+      setError(
+        workbenchId === "story-set"
+          ? "请至少添加一张产品图（用于保持套图中的产品一致性）。"
+          : "请至少添加一张产品图（用于保持产品一致性）。"
+      );
       return;
     }
-    if (mergedCount > 16) {
-      setError("产品图与参考图合计最多 16 张。");
+    if (inputCount > 16) {
+      setError(
+        productWorkbench
+          ? workbenchId === "story-set"
+            ? "产品图与套图参考合计最多 16 张。"
+            : "产品图与参考图合计最多 16 张。"
+          : "参考图最多 16 张。"
+      );
       return;
     }
     const n = Math.min(10, Math.max(1, Math.floor(imageCount)));
@@ -338,7 +599,9 @@ export default function Workbench() {
         body: JSON.stringify({
           modelId,
           prompt: prompt.trim(),
-          product_urls: productSlots.map((s) => s.url),
+          workbench_id: workbenchId,
+          workbench_definition: currentWorkbenchDefinition,
+          product_urls: productWorkbench ? productSlots.map((s) => s.url) : [],
           reference_urls: refSlots.map((s) => s.url),
           image_count: n,
           aspect_ratio: aspect,
@@ -461,10 +724,14 @@ export default function Workbench() {
     const rows = sortProjectRows(project.rows);
     const g = rows[0];
     if (!g) return;
+    setWorkbenchId(project.workbenchId);
     setPrompt(g.prompt);
     setAspect(g.aspect_ratio || "auto");
     setResolution(g.resolution || "1K");
     setModelId(models.some((m) => m.id === g.model) ? g.model : modelId);
+    setImageCount(
+      Math.min(10, Math.max(1, Math.floor(g.batch_size ?? rows.length) || 1))
+    );
     const { product, reference } = parseInputPayload(g.input_urls);
     setProductSlots(product.map((url) => ({ id: crypto.randomUUID(), url })));
     setRefSlots(reference.map((url) => ({ id: crypto.randomUUID(), url })));
@@ -501,12 +768,81 @@ export default function Workbench() {
 
   return (
     <div className="space-y-8">
+      <section className="rounded-xl border border-canvas-border bg-white p-4 shadow-panel">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-semibold text-ink">工作台</h2>
+            <p className="mt-1 text-xs text-ink-muted">
+              当前：{getWorkbenchLabel(workbenchId)}
+            </p>
+          </div>
+          <div className="inline-flex rounded-lg border border-canvas-border bg-canvas-muted p-1">
+            {WORKBENCH_OPTIONS.map((item) => {
+              const active = item.id === workbenchId;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => {
+                    setWorkbenchId(item.id);
+                    if (item.id === "story-set") {
+                      setImageCount(STORY_SET_DEFAULT_COUNT);
+                    }
+                    setDefinitionStatus(null);
+                    setError(null);
+                  }}
+                  className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${
+                    active
+                      ? "bg-white text-ink shadow-sm"
+                      : "text-ink-muted hover:text-ink"
+                  }`}
+                >
+                  {item.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        <label className="mt-4 block text-xs font-medium text-ink-muted">
+          工作台定义
+        </label>
+        <textarea
+          value={currentWorkbenchDefinition}
+          onChange={(e) => updateWorkbenchDefinition(e.target.value)}
+          rows={3}
+          className="mt-1 w-full resize-y rounded-md border border-canvas-border px-2 py-2 text-sm outline-none ring-accent focus:ring-2"
+          placeholder="写下这个工作台后续生成时要长期遵守的要求。"
+        />
+        <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+          <p className="text-xs text-ink-faint">
+            提交任务时会与当前 Prompt 一起发送。
+          </p>
+          <div className="flex items-center gap-2">
+            {definitionStatus && (
+              <span className="text-xs text-ink-muted">{definitionStatus}</span>
+            )}
+            <button
+              type="button"
+              onClick={() => void saveWorkbenchDefinition()}
+              disabled={definitionSaving}
+              className="rounded-md border border-canvas-border bg-white px-3 py-1.5 text-xs font-medium text-ink hover:bg-canvas-muted disabled:opacity-50"
+            >
+              {definitionSaving ? "保存中…" : "保存定义"}
+            </button>
+          </div>
+        </div>
+      </section>
+
       <div className="grid min-h-[560px] grid-cols-1 gap-4 lg:grid-cols-12">
         <section className="lg:col-span-4">
           <div className="flex h-full flex-col rounded-xl border border-canvas-border bg-white p-4 shadow-panel">
             <h2 className="text-sm font-semibold text-ink">原图</h2>
             <p className="mt-1 text-xs text-ink-muted">
-              两栏分别上传：左侧为产品图（保持产品一致，适合 Etsy 展示），右侧为参考图（仅参考氛围、光影、风格与摆放）。均支持多选文件与 URL。
+              {workbenchId === "story-set"
+                ? "两栏分别上传：左侧为产品图（保持整套图产品一致），右侧为套图参考（建议放入主图、场景图、特写图、包装图、使用图、氛围图等）。均支持多选文件与 URL。"
+                : workbenchId === "etsy"
+                  ? "两栏分别上传：左侧为产品图（保持产品一致，适合 Etsy 展示），右侧为参考图（仅参考氛围、光影、风格与摆放）。均支持多选文件与 URL。"
+                  : "可上传参考图，也可以只填写 Prompt。支持多选文件与 URL。"}
               {uploadIntro}
               {!kieKeyConfigured && (
                 <span className="mt-1 block text-amber-800">
@@ -520,15 +856,24 @@ export default function Workbench() {
               </p>
             )}
             <p className="mt-2 text-[11px] text-ink-faint">
-              当前合计 {mergedCount} / 16 张（产品 {productSlots.length} + 参考 {refSlots.length}）
+              {productWorkbench
+                ? `当前合计 ${inputCount} / 16 张（产品 ${productSlots.length} + ${referenceLabel} ${refSlots.length}）`
+                : `当前参考图 ${refSlots.length} / 16 张`}
             </p>
 
-            <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div
+              className={`mt-4 grid grid-cols-1 gap-4 ${
+                productWorkbench ? "sm:grid-cols-2" : ""
+              }`}
+            >
               {/* 产品图 */}
+              {productWorkbench && (
               <div className="flex min-h-0 flex-col rounded-lg border border-canvas-border bg-canvas-muted/40 p-3">
                 <h3 className="text-xs font-semibold text-ink">产品图</h3>
                 <p className="mt-0.5 text-[10px] leading-snug text-ink-muted">
-                  保持产品一致性，用于生成 Etsy 风格产品展示图。
+                  {workbenchId === "story-set"
+                    ? "保持整套图中的产品主体、材质、颜色与细节一致。"
+                    : "保持产品一致性，用于生成 Etsy 风格产品展示图。"}
                 </p>
                 <div
                   className={`mt-2 rounded-lg border border-dashed transition ${
@@ -629,12 +974,17 @@ export default function Workbench() {
                   ))}
                 </ul>
               </div>
+              )}
 
               {/* 参考图 */}
               <div className="flex min-h-0 flex-col rounded-lg border border-canvas-border bg-canvas-muted/40 p-3">
-                <h3 className="text-xs font-semibold text-ink">参考图</h3>
+                <h3 className="text-xs font-semibold text-ink">{referenceLabel}</h3>
                 <p className="mt-0.5 text-[10px] leading-snug text-ink-muted">
-                  参考氛围、光影、风格与摆放；不替代产品本身。
+                  {workbenchId === "story-set"
+                    ? "建议放入主图、场景图、特写图、包装图、使用图与氛围图，用来统一故事与视觉调性。"
+                    : workbenchId === "etsy"
+                      ? "参考氛围、光影、风格与摆放；不替代产品本身。"
+                      : "可选。上传后会和 Prompt 一起作为生成参考。"}
                 </p>
                 <div
                   className={`mt-2 rounded-lg border border-dashed transition ${
@@ -695,7 +1045,9 @@ export default function Workbench() {
                     }}
                   />
                   <div className="pointer-events-none px-2 py-6 text-center text-[10px] text-ink-muted">
-                    拖拽或点击上传参考图
+                    {workbenchId === "story-set"
+                      ? "拖拽或点击上传套图参考"
+                      : "拖拽或点击上传参考图"}
                   </div>
                 </div>
                 <div className="mt-2 flex gap-1">
@@ -760,11 +1112,13 @@ export default function Workbench() {
               onChange={(e) => setPrompt(e.target.value)}
               rows={7}
               className="mt-1 resize-y rounded-md border border-canvas-border px-2 py-2 text-sm outline-none ring-accent focus:ring-2"
-              placeholder="描述希望如何基于产品图生成展示图……"
+              placeholder={promptPlaceholder}
             />
             <label className="mt-3 text-xs font-medium text-ink-muted">生成数量</label>
             <p className="mt-0.5 text-[10px] text-ink-faint">
-              将按顺序创建多个独立 Kie 任务（每张 1 次调用），最多 10。
+              {workbenchId === "story-set"
+                ? "套图默认 9 张，可临时调整；将按顺序创建多个独立 Kie 任务，最多 10。"
+                : "将按顺序创建多个独立 Kie 任务（每张 1 次调用），最多 10。"}
             </p>
             <input
               type="number"
@@ -948,6 +1302,7 @@ export default function Workbench() {
                   <div className="space-y-1 p-3 pb-2">
                     <p className="line-clamp-2 text-xs text-ink-muted">{project.prompt}</p>
                     <p className="text-[11px] text-ink-faint">
+                      {getWorkbenchLabel(project.workbenchId)} ·{" "}
                       {new Date(project.createdAt).toLocaleString()} · {project.model}
                     </p>
                   </div>
