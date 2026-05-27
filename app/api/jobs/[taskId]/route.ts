@@ -31,14 +31,19 @@ export async function GET(
   const resultUrls = parseResultUrls(data.resultJson);
 
   const now = Date.now();
+  const successWithoutImages = data.state === "success" && resultUrls.length === 0;
+  const state = successWithoutImages ? "fail" : data.state;
+  const failMsg = successWithoutImages
+    ? "生成成功但没有返回图片 URL，请重试本张。"
+    : data.failMsg ?? null;
   const resultJsonStr =
     data.state === "success" && resultUrls.length > 0
       ? JSON.stringify({ resultUrls })
       : null;
 
   const patch: Parameters<typeof updateGenerationByTaskId>[1] = {
-    state: data.state,
-    fail_msg: data.failMsg ?? null,
+    state,
+    fail_msg: failMsg,
     fail_code: data.failCode ?? null,
     credits: data.creditsConsumed ?? null,
     updated_at: now,
@@ -51,10 +56,10 @@ export async function GET(
   return NextResponse.json({
     taskId: data.taskId,
     model: data.model,
-    state: data.state,
+    state,
     param: data.param,
     resultUrls,
-    failMsg: data.failMsg,
+    failMsg,
     failCode: data.failCode,
     progress: data.progress,
     creditsConsumed: data.creditsConsumed,

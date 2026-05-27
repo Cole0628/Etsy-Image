@@ -155,9 +155,14 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "无效的 resolution" }, { status: 400 });
   }
 
-  const inputUrlsJson = buildInputUrlsStorage(productUrls, referenceUrls);
   const batchId = randomUUID();
-  const jobs: { id: string; taskId: string }[] = [];
+  const jobs: {
+    id: string;
+    taskId: string;
+    batchIndex: number;
+    productUrls: string[];
+    referenceUrls: string[];
+  }[] = [];
 
   for (let i = 0; i < batchSize; i++) {
     const taskProductUrls =
@@ -202,6 +207,7 @@ export async function POST(request: Request) {
 
     const id = randomUUID();
     const now = Date.now();
+    const taskInputUrlsJson = buildInputUrlsStorage(taskProductUrls, referenceUrls);
     insertGeneration({
       id,
       task_id: created.data.taskId,
@@ -209,7 +215,7 @@ export async function POST(request: Request) {
       prompt: body.prompt.trim(),
       aspect_ratio: aspect,
       resolution,
-      input_urls: inputUrlsJson,
+      input_urls: taskInputUrlsJson,
       state: "waiting",
       result_urls: null,
       fail_msg: null,
@@ -224,7 +230,13 @@ export async function POST(request: Request) {
       workbench_definition: workbenchDefinition || null,
     });
 
-    jobs.push({ id, taskId: created.data.taskId });
+    jobs.push({
+      id,
+      taskId: created.data.taskId,
+      batchIndex: i,
+      productUrls: taskProductUrls,
+      referenceUrls,
+    });
   }
 
   return NextResponse.json({

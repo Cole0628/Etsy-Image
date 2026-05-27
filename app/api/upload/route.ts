@@ -28,6 +28,15 @@ function extFor(file: File): string {
   return ".bin";
 }
 
+function uploadMetadata(file: File, backend: "kie-file-upload" | "blob" | "local") {
+  return {
+    backend,
+    originalName: file.name || "image",
+    size: file.size,
+    uploadedAt: Date.now(),
+  };
+}
+
 async function saveToPublicUploads(
   file: File,
   request: Request
@@ -76,7 +85,7 @@ export async function POST(request: Request) {
       const url = await kieFileStreamUpload(apiKey, file);
       return NextResponse.json({
         url,
-        backend: "kie-file-upload",
+        ...uploadMetadata(file, "kie-file-upload"),
         hint: "已通过 Kie 文件上传托管，生图任务可正常拉取原图。",
       });
     } catch (e) {
@@ -88,14 +97,14 @@ export async function POST(request: Request) {
   if (process.env.BLOB_READ_WRITE_TOKEN) {
     try {
       const safeName = file.name.replace(/[^\w.\-]+/g, "_") || "upload";
-      const pathname = `kie-workbench/${Date.now()}_${safeName}`;
+      const pathname = `kie-workbench/${Date.now()}_${randomBytes(8).toString("hex")}_${safeName}`;
       const blob = await put(pathname, file, {
         access: "public",
         token: process.env.BLOB_READ_WRITE_TOKEN,
       });
       return NextResponse.json({
         url: blob.url,
-        backend: "blob",
+        ...uploadMetadata(file, "blob"),
         hint: "已上传至 Blob。请确保 Kie 能访问该公网 HTTPS 地址。",
       });
     } catch (e) {
@@ -108,7 +117,7 @@ export async function POST(request: Request) {
     const url = await saveToPublicUploads(file, request);
     return NextResponse.json({
       url,
-      backend: "local",
+      ...uploadMetadata(file, "local"),
       warning:
         "当前未配置 Kie API Key：返回的是本机/内网 URL，Kie 云端无法拉取，生图会报 Image fetch failed。请到「设置」保存 Key，或配置 BLOB_READ_WRITE_TOKEN。",
     });

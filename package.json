@@ -1,12 +1,13 @@
 {
   "name": "kie-image-workbench",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "Kie internal image workbench",
   "author": "Internal",
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "next dev -p 3300",
+    "test": "node --test tests/*.test.mjs",
     "build": "next build",
     "start": "next start -p 3300",
     "lint": "next lint",

@@ -1,3 +1,12 @@
+import uploadNaming from "./upload-naming";
+
+const { buildKieUploadNames } = uploadNaming as {
+  buildKieUploadNames: (originalName: string) => {
+    uploadPath: string;
+    fileName: string;
+  };
+};
+
 /**
  * Kie「文件上传」服务（与 api.kie.ai 任务接口不同域名）。
  * @see https://docs.kie.ai/file-upload-api/quickstart
@@ -53,12 +62,10 @@ export async function kieFileStreamUpload(
   }
 
   const form = new FormData();
-  form.append("file", file, file.name || "image.jpg");
-  form.append("uploadPath", "kie-workbench");
-  const safeName = file.name?.replace(/[^\w.\-]+/g, "_");
-  if (safeName) {
-    form.append("fileName", safeName);
-  }
+  const uploadNames = buildKieUploadNames(file.name || "image.jpg");
+  form.append("file", file, uploadNames.fileName);
+  form.append("uploadPath", uploadNames.uploadPath);
+  form.append("fileName", uploadNames.fileName);
 
   const res = await fetch(`${fileUploadBase()}/api/file-stream-upload`, {
     method: "POST",

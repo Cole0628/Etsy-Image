@@ -45,13 +45,21 @@ type Generation = {
 type ImageSlot = {
   id: string;
   url: string;
+  previewUrl?: string;
+  originalName?: string;
+  size?: number;
+  uploadedAt?: number;
+  backend?: "kie-file-upload" | "blob" | "local";
 };
 
 type BatchOutputItem = {
   taskId: string;
+  batchIndex?: number;
   submittedAt: number;
   state: string;
   resultUrls: string[];
+  productUrls: string[];
+  referenceUrls: string[];
   failMsg?: string;
   costTimeMs?: number | null;
   clientElapsedMs?: number | null;
@@ -62,6 +70,10 @@ type ActiveProject = {
   label: string;
   prompt: string;
   workbenchId: WorkbenchId;
+  modelId: string;
+  aspect: string;
+  resolution: string;
+  workbenchDefinition: string;
   submittedAt: number;
   items: BatchOutputItem[];
 };
@@ -69,6 +81,14 @@ type ActiveProject = {
 type DownloadedFile = {
   filename: string;
   path: string;
+};
+
+type CreatedJob = {
+  id: string;
+  taskId: string;
+  batchIndex?: number;
+  productUrls?: string[];
+  referenceUrls?: string[];
 };
 
 type HistoryProject = {
@@ -118,6 +138,12 @@ function isProductWorkbench(id: WorkbenchId): boolean {
   return id === "etsy" || id === "story-set" || id === "sku-background";
 }
 
+function getReferenceLabelForWorkbench(id: WorkbenchId): string {
+  if (id === "story-set") return "套图参考";
+  if (id === "sku-background") return "背景图";
+  return "参考图";
+}
+
 function normalizeImageSlots(value: unknown): ImageSlot[] {
   if (!Array.isArray(value)) return [];
   return value
@@ -128,7 +154,33 @@ function normalizeImageSlots(value: unknown): ImageSlot[] {
         typeof (item as ImageSlot).id === "string" &&
         typeof (item as ImageSlot).url === "string"
     )
-    .map((item) => ({ id: item.id, url: item.url }));
+    .map((item) => ({
+      id: item.id,
+      url: item.url,
+      previewUrl:
+        typeof item.previewUrl === "string" ? item.previewUrl : undefined,
+      originalName:
+        typeof item.originalName === "string" ? item.originalName : undefined,
+      size:
+        typeof item.size === "number" && Number.isFinite(item.size)
+          ? item.size
+          : undefined,
+      uploadedAt:
+        typeof item.uploadedAt === "number" && Number.isFinite(item.uploadedAt)
+          ? item.uploadedAt
+          : undefined,
+      backend:
+        item.backend === "kie-file-upload" ||
+        item.backend === "blob" ||
+        item.backend === "local"
+          ? item.backend
+          : undefined,
+    }));
+}
+
+function normalizeUrlArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((url): url is string => typeof url === "string");
 }
 
 function normalizeBatchOutputs(value: unknown): BatchOutputItem[] | null {
@@ -144,11 +196,15 @@ function normalizeBatchOutputs(value: unknown): BatchOutputItem[] | null {
     )
     .map((item) => ({
       taskId: item.taskId,
+      batchIndex:
+        typeof item.batchIndex === "number" && Number.isFinite(item.batchIndex)
+          ? item.batchIndex
+          : undefined,
       submittedAt: item.submittedAt,
       state: item.state,
-      resultUrls: Array.isArray(item.resultUrls)
-        ? item.resultUrls.filter((url): url is string => typeof url === "string")
-        : [],
+      resultUrls: normalizeUrlArray(item.resultUrls),
+      productUrls: normalizeUrlArray(item.productUrls),
+      referenceUrls: normalizeUrlArray(item.referenceUrls),
       failMsg: typeof item.failMsg === "string" ? item.failMsg : undefined,
       costTimeMs:
         typeof item.costTimeMs === "number" && Number.isFinite(item.costTimeMs)
@@ -180,6 +236,20 @@ function normalizeActiveProjects(value: unknown): ActiveProject[] {
       label: item.label,
       prompt: item.prompt,
       workbenchId: item.workbenchId,
+      modelId: typeof item.modelId === "string" ? item.modelId : "",
+      aspect:
+        typeof item.aspect === "string" && ASPECT_OPTIONS.includes(item.aspect as never)
+          ? item.aspect
+          : "auto",
+      resolution:
+        typeof item.resolution === "string" &&
+        RES_OPTIONS.includes(item.resolution as never)
+          ? item.resolution
+          : "1K",
+      workbenchDefinition:
+        typeof item.workbenchDefinition === "string"
+          ? item.workbenchDefinition
+          : "",
       submittedAt: item.submittedAt,
       items: normalizeBatchOutputs(item.items) ?? [],
     }))
@@ -231,6 +301,18 @@ function readWorkbenchDraft(): WorkbenchDraft | null {
                   label: "当前项目",
                   prompt: typeof parsed.prompt === "string" ? parsed.prompt : "",
                   workbenchId: parsed.workbenchId,
+                  modelId: typeof parsed.modelId === "string" ? parsed.modelId : "",
+                  aspect:
+                    typeof parsed.aspect === "string" &&
+                    ASPECT_OPTIONS.includes(parsed.aspect as never)
+                      ? parsed.aspect
+                      : "auto",
+                  resolution:
+                    typeof parsed.resolution === "string" &&
+                    RES_OPTIONS.includes(parsed.resolution as never)
+                      ? parsed.resolution
+                      : "1K",
+                  workbenchDefinition: "",
                   submittedAt: legacySubmittedAt,
                   items: batchOutputs,
                 },
@@ -452,8 +534,8 @@ export default function Workbench() {
       aspect,
       resolution,
       imageCount,
-      productSlots,
-      refSlots,
+      productSlots: productSlots.map(({ previewUrl: _previewUrl, ...slot }) => slot),
+      refSlots: refSlots.map(({ previewUrl: _previewUrl, ...slot }) => slot),
       pasteProduct,
       pasteRef,
       activeProjects,
@@ -493,12 +575,7 @@ export default function Workbench() {
       : workbenchId === "sku-background"
       ? "描述 SKU 换背景的商业风格、构图要求、保留细节与禁止项；避免悬空手、断手、AI感人体……"
       : "描述你想生成的图片……";
-  const referenceLabel =
-    workbenchId === "story-set"
-      ? "套图参考"
-      : skuBackgroundWorkbench
-        ? "背景图"
-        : "参考图";
+  const referenceLabel = getReferenceLabelForWorkbench(workbenchId);
   const selectedActiveProject =
     activeProjects.find((project) => project.id === selectedActiveProjectId) ??
     activeProjects[0] ??
@@ -630,26 +707,44 @@ export default function Workbench() {
     setUploadHint(null);
     try {
       for (const file of fileItems) {
+        const previewUrl = URL.createObjectURL(file);
         const fd = new FormData();
         fd.set("file", file);
-        const r = await fetch("/api/upload", { method: "POST", body: fd });
-        const j = (await r.json()) as {
-          url?: string;
-          error?: string;
-          warning?: string;
-          hint?: string;
-        };
-        if (!r.ok) throw new Error(j.error || "上传失败");
-        if (!j.url) throw new Error("上传无返回 URL");
-        const url = j.url;
-        const slot: ImageSlot = { id: crypto.randomUUID(), url };
-        if (kind === "product") {
-          setProductSlots((s) => [...s, slot]);
-        } else {
-          setRefSlots((s) => [...s, slot]);
+        try {
+          const r = await fetch("/api/upload", { method: "POST", body: fd });
+          const j = (await r.json()) as {
+            url?: string;
+            error?: string;
+            warning?: string;
+            hint?: string;
+            backend?: ImageSlot["backend"];
+            originalName?: string;
+            size?: number;
+            uploadedAt?: number;
+          };
+          if (!r.ok) throw new Error(j.error || "上传失败");
+          if (!j.url) throw new Error("上传无返回 URL");
+          const slot: ImageSlot = {
+            id: crypto.randomUUID(),
+            url: j.url,
+            previewUrl,
+            originalName: j.originalName || file.name,
+            size: typeof j.size === "number" ? j.size : file.size,
+            uploadedAt:
+              typeof j.uploadedAt === "number" ? j.uploadedAt : Date.now(),
+            backend: j.backend,
+          };
+          if (kind === "product") {
+            setProductSlots((s) => [...s, slot]);
+          } else {
+            setRefSlots((s) => [...s, slot]);
+          }
+          if (j.warning) setUploadHint(j.warning);
+          else if (j.hint) setUploadHint(j.hint);
+        } catch (e) {
+          URL.revokeObjectURL(previewUrl);
+          throw e;
         }
-        if (j.warning) setUploadHint(j.warning);
-        else if (j.hint) setUploadHint(j.hint);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "上传失败");
@@ -660,9 +755,17 @@ export default function Workbench() {
 
   const removeSlot = (kind: "product" | "reference", id: string) => {
     if (kind === "product") {
-      setProductSlots((s) => s.filter((x) => x.id !== id));
+      setProductSlots((s) => {
+        const removed = s.find((x) => x.id === id);
+        if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+        return s.filter((x) => x.id !== id);
+      });
     } else {
-      setRefSlots((s) => s.filter((x) => x.id !== id));
+      setRefSlots((s) => {
+        const removed = s.find((x) => x.id === id);
+        if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+        return s.filter((x) => x.id !== id);
+      });
     }
   };
 
@@ -764,7 +867,7 @@ export default function Workbench() {
       const j = (await r.json()) as {
         batchId?: string;
         imageCount?: number;
-        jobs?: { id: string; taskId: string }[];
+        jobs?: CreatedJob[];
         error?: string;
         partial?: boolean;
       };
@@ -784,12 +887,19 @@ export default function Workbench() {
         label: `${getWorkbenchLabel(workbenchId)} · ${taskCount} 张`,
         prompt: prompt.trim(),
         workbenchId,
+        modelId,
+        aspect,
+        resolution,
+        workbenchDefinition: currentWorkbenchDefinition,
         submittedAt: now,
         items: j.jobs.map((job) => ({
           taskId: job.taskId,
+          batchIndex: job.batchIndex,
           submittedAt: now,
           state: "waiting",
           resultUrls: [],
+          productUrls: job.productUrls ?? [],
+          referenceUrls: job.referenceUrls ?? [],
         })),
       };
       setActiveProjects((prev) => [project, ...prev]);
@@ -797,6 +907,76 @@ export default function Workbench() {
       void loadHistory();
     } catch (e) {
       setError(e instanceof Error ? e.message : "创建任务失败");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const retryItem = async (project: ActiveProject, item: BatchOutputItem) => {
+    setError(null);
+    if (!project.modelId) {
+      setError("这个历史任务缺少模型信息，不能直接重试。请重新提交当前项目。");
+      return;
+    }
+    setBusy(true);
+    try {
+      const r = await fetch("/api/jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          modelId: project.modelId,
+          prompt: project.prompt,
+          workbench_id: project.workbenchId,
+          workbench_definition: project.workbenchDefinition,
+          product_urls: item.productUrls,
+          reference_urls: item.referenceUrls,
+          image_count: 1,
+          aspect_ratio: project.aspect,
+          resolution: project.resolution,
+        }),
+      });
+      const j = (await r.json()) as {
+        jobs?: CreatedJob[];
+        error?: string;
+      };
+      if (!r.ok) {
+        throw new Error(j.error || "重试任务创建失败");
+      }
+      const job = j.jobs?.[0];
+      if (!job) {
+        throw new Error(j.error || "重试任务未返回任务 ID");
+      }
+      const now = Date.now();
+      setActiveProjects((prev) =>
+        prev.map((candidate) =>
+          candidate.id !== project.id
+            ? candidate
+            : {
+                ...candidate,
+                items: candidate.items.map((candidateItem) =>
+                  candidateItem.taskId !== item.taskId
+                    ? candidateItem
+                    : {
+                        ...candidateItem,
+                        taskId: job.taskId,
+                        batchIndex: job.batchIndex ?? candidateItem.batchIndex,
+                        submittedAt: now,
+                        state: "waiting",
+                        resultUrls: [],
+                        productUrls: job.productUrls ?? candidateItem.productUrls,
+                        referenceUrls:
+                          job.referenceUrls ?? candidateItem.referenceUrls,
+                        failMsg: undefined,
+                        costTimeMs: null,
+                        clientElapsedMs: null,
+                      }
+                ),
+              }
+        )
+      );
+      void loadHistory();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "重试任务创建失败");
     } finally {
       setBusy(false);
     }
@@ -907,7 +1087,9 @@ export default function Workbench() {
     setImageCount(
       Math.min(10, Math.max(1, Math.floor(g.batch_size ?? rows.length) || 1))
     );
-    const { product, reference } = parseInputPayload(g.input_urls);
+    const parsedInputs = rows.map((row) => parseInputPayload(row.input_urls));
+    const product = [...new Set(parsedInputs.flatMap((input) => input.product))];
+    const reference = [...new Set(parsedInputs.flatMap((input) => input.reference))];
     setProductSlots(product.map((url) => ({ id: crypto.randomUUID(), url })));
     setRefSlots(reference.map((url) => ({ id: crypto.randomUUID(), url })));
     const submittedAt = Math.min(...rows.map((row) => row.created_at));
@@ -916,17 +1098,25 @@ export default function Workbench() {
       label: `${getWorkbenchLabel(project.workbenchId)} · 历史项目`,
       prompt: project.prompt,
       workbenchId: project.workbenchId,
+      modelId: g.model,
+      aspect: g.aspect_ratio || "auto",
+      resolution: g.resolution || "1K",
+      workbenchDefinition: g.workbench_definition || "",
       submittedAt,
       items: rows.map((row) => {
+        const input = parseInputPayload(row.input_urls);
         const elapsed =
           row.state === "success" && row.updated_at > row.created_at
             ? row.updated_at - row.created_at
             : null;
         return {
           taskId: row.task_id,
+          batchIndex: row.batch_index ?? undefined,
           submittedAt: row.created_at,
           state: row.state,
           resultUrls: parseResultUrls(row.result_urls),
+          productUrls: input.product,
+          referenceUrls: input.reference,
           failMsg: row.fail_msg || undefined,
           costTimeMs: null,
           clientElapsedMs: elapsed,
@@ -1150,9 +1340,9 @@ export default function Workbench() {
                       className="flex items-center gap-2 rounded-md border border-canvas-border bg-white p-1.5"
                     >
                       {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img src={s.url} alt="" className="h-10 w-10 shrink-0 rounded object-cover" />
+                      <img src={s.previewUrl ?? s.url} alt="" className="h-10 w-10 shrink-0 rounded object-cover" />
                       <p className="min-w-0 flex-1 truncate text-[10px] text-ink-muted" title={s.url}>
-                        {s.url}
+                        {s.originalName ? `${s.originalName} · ${s.url}` : s.url}
                       </p>
                       <button
                         type="button"
@@ -1268,9 +1458,9 @@ export default function Workbench() {
                       className="flex items-center gap-2 rounded-md border border-canvas-border bg-white p-1.5"
                     >
                       {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img src={s.url} alt="" className="h-10 w-10 shrink-0 rounded object-cover" />
+                      <img src={s.previewUrl ?? s.url} alt="" className="h-10 w-10 shrink-0 rounded object-cover" />
                       <p className="min-w-0 flex-1 truncate text-[10px] text-ink-muted" title={s.url}>
-                        {s.url}
+                        {s.originalName ? `${s.originalName} · ${s.url}` : s.url}
                       </p>
                       <button
                         type="button"
@@ -1472,10 +1662,47 @@ export default function Workbench() {
                               {item.state}
                             </span>
                             {item.failMsg && <span className="text-red-600">{item.failMsg}</span>}
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => void retryItem(project, item)}
+                              className="rounded-md border border-canvas-border bg-white px-2 py-1 font-medium text-ink hover:bg-canvas-muted disabled:opacity-50"
+                            >
+                              重试本张
+                            </button>
                           </div>
+                          {(item.productUrls.length > 0 || item.referenceUrls.length > 0) && (
+                            <div className="mb-2 flex flex-wrap gap-2 text-[10px] text-ink-muted">
+                              {item.productUrls.map((url, inputIdx) => (
+                                <figure key={`p:${url}:${inputIdx}`} className="flex items-center gap-1">
+                                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                                  <img src={url} alt="" className="h-9 w-9 rounded object-cover" />
+                                  <figcaption>产品 {inputIdx + 1}</figcaption>
+                                </figure>
+                              ))}
+                              {item.referenceUrls.map((url, inputIdx) => (
+                                <figure key={`r:${url}:${inputIdx}`} className="flex items-center gap-1">
+                                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                                  <img src={url} alt="" className="h-9 w-9 rounded object-cover" />
+                                  <figcaption>
+                                    {getReferenceLabelForWorkbench(project.workbenchId)} {inputIdx + 1}
+                                  </figcaption>
+                                </figure>
+                              ))}
+                            </div>
+                          )}
                           <div className="flex flex-wrap gap-3">
-                            {item.resultUrls.length === 0 && item.state !== "success" && (
+                            {item.resultUrls.length === 0 &&
+                              ["waiting", "queuing", "generating", "unknown"].includes(item.state) && (
                               <p className="text-xs text-ink-muted">生成中…</p>
+                            )}
+                            {item.resultUrls.length === 0 && item.state === "success" && (
+                              <p className="text-xs text-red-600">
+                                生成成功但没有返回图片，请重试本张。
+                              </p>
+                            )}
+                            {item.resultUrls.length === 0 && item.state === "fail" && (
+                              <p className="text-xs text-red-600">本张未生成图片。</p>
                             )}
                             {item.resultUrls.map((u) => {
                               const showMs = item.costTimeMs ?? item.clientElapsedMs;
