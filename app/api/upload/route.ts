@@ -82,10 +82,11 @@ export async function POST(request: Request) {
   const apiKey = getEffectiveKieApiKey();
   if (apiKey) {
     try {
-      const url = await kieFileStreamUpload(apiKey, file);
+      const uploaded = await kieFileStreamUpload(apiKey, file);
       return NextResponse.json({
-        url,
-        ...uploadMetadata(file, "kie-file-upload"),
+        ...uploaded,
+        size: uploaded.size ?? file.size,
+        mimeType: uploaded.mimeType ?? file.type,
         hint: "已通过 Kie 文件上传托管，生图任务可正常拉取原图。",
       });
     } catch (e) {

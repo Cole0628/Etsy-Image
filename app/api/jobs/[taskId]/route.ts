@@ -5,9 +5,13 @@ import {
   kieErrorMessage,
   parseResultUrls,
 } from "@/lib/kie/client";
+import preflight from "@/lib/kie/input-url-preflight";
 import { getEffectiveKieApiKey } from "@/lib/settings";
 
 export const dynamic = "force-dynamic";
+const { mapKieFailureMessage } = preflight as {
+  mapKieFailureMessage: (message: string | undefined | null) => string;
+};
 
 export async function GET(
   _request: Request,
@@ -35,7 +39,9 @@ export async function GET(
   const state = successWithoutImages ? "fail" : data.state;
   const failMsg = successWithoutImages
     ? "生成成功但没有返回图片 URL，请重试本张。"
-    : data.failMsg ?? null;
+    : data.state === "fail"
+      ? mapKieFailureMessage(data.failMsg)
+      : data.failMsg ?? null;
   const resultJsonStr =
     data.state === "success" && resultUrls.length > 0
       ? JSON.stringify({ resultUrls })

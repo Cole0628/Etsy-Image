@@ -5,7 +5,11 @@ import { isAllowedInputImageUrl } from "@/lib/input-url";
 import {
   buildAugmentedPrompt,
   buildInputUrlsStorage,
+  normalizeInputImageList,
+  type InputImageMeta,
 } from "@/lib/input-payload";
+import preflight from "@/lib/kie/input-url-preflight";
+import { kieFileUrlUpload } from "@/lib/kie/file-upload";
 import {
   kieCreateTask,
   kieErrorMessage,
@@ -24,6 +28,14 @@ const ASPECTS = new Set(["auto", "1:1", "9:16", "16:9", "4:3", "3:4"]);
 const RESOLUTIONS = new Set(["1K", "2K", "4K"]);
 const MAX_INPUTS = 16;
 const MAX_BATCH = 10;
+const { classifyInputImageUrl, mapKieFailureMessage } = preflight as {
+  classifyInputImageUrl: (
+    url: string,
+    meta?: Partial<InputImageMeta>,
+    options?: { now?: number }
+  ) => { kind: "ready" | "mirror" | "blocked"; message?: string };
+  mapKieFailureMessage: (message: string | undefined | null) => string;
+};
 
 type Body = {
   prompt: string;
@@ -35,6 +47,8 @@ type Body = {
   /** 新版：产品图（至少 1 张） */
   product_urls?: string[];
   reference_urls?: string[];
+  product_images?: InputImageMeta[];
+  reference_images?: InputImageMeta[];
   /** 1–10，默认 1 */
   image_count?: number;
   /** 兼容旧客户端：等同全部作为产品图 */
@@ -46,13 +60,52 @@ function normalizeUrlList(x: unknown): string[] {
   return x.filter((u): u is string => typeof u === "string");
 }
 
-function validateUrls(label: string, urls: string[]) {
-  for (const u of urls) {
-    if (!isAllowedInputImageUrl(u)) {
-      return `无效或不支持的图片地址（${label}）: ${u}`;
-    }
+function inputsFromBody(images: unknown, urls: unknown): InputImageMeta[] {
+  const imageList = normalizeInputImageList(images);
+  if (imageList.length > 0) return imageList;
+  return normalizeUrlList(urls).map((url) => ({ url }));
+}
+
+function sourceNameForUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return parsed.pathname.split("/").filter(Boolean).pop() || "image.jpg";
+  } catch {
+    return "image.jpg";
   }
-  return null;
+}
+
+async function prepareInputImages(
+  apiKey: string,
+  label: string,
+  inputs: InputImageMeta[]
+): Promise<InputImageMeta[]> {
+  const ready: InputImageMeta[] = [];
+  for (const input of inputs) {
+    if (!isAllowedInputImageUrl(input.url)) {
+      throw new Error(`无效或不支持的图片地址（${label}）: ${input.url}`);
+    }
+    const classification = classifyInputImageUrl(input.url, input);
+    if (classification.kind === "blocked") {
+      throw new Error(`${label}：${classification.message ?? "图片 URL 不可用"} (${input.url})`);
+    }
+    if (classification.kind === "ready") {
+      ready.push(input);
+      continue;
+    }
+    const uploaded = await kieFileUrlUpload(
+      apiKey,
+      input.url,
+      input.originalName || sourceNameForUrl(input.url)
+    );
+    ready.push({
+      ...input,
+      ...uploaded,
+      url: uploaded.url,
+      sourceUrl: input.sourceUrl || input.url,
+    });
+  }
+  return ready;
 }
 
 export async function POST(request: Request) {
@@ -85,43 +138,43 @@ export async function POST(request: Request) {
       ? body.workbench_definition.trim()
       : "";
 
-  let productUrls = normalizeUrlList(body.product_urls);
-  let referenceUrls = normalizeUrlList(body.reference_urls);
+  let productInputs = inputsFromBody(body.product_images, body.product_urls);
+  let referenceInputs = inputsFromBody(body.reference_images, body.reference_urls);
   const legacyInputUrls = normalizeUrlList(body.input_urls);
   if (
-    productUrls.length === 0 &&
-    referenceUrls.length === 0 &&
+    productInputs.length === 0 &&
+    referenceInputs.length === 0 &&
     legacyInputUrls.length > 0
   ) {
     if (workbenchId === "default") {
-      referenceUrls = legacyInputUrls;
+      referenceInputs = legacyInputUrls.map((url) => ({ url }));
     } else {
-      productUrls = legacyInputUrls;
+      productInputs = legacyInputUrls.map((url) => ({ url }));
     }
   }
 
-  if (workbenchId !== "default" && productUrls.length === 0) {
+  if (workbenchId !== "default" && productInputs.length === 0) {
     return NextResponse.json(
       { error: "请至少上传一张产品图（product_urls）" },
       { status: 400 }
     );
   }
 
-  if (workbenchId === "sku-background" && referenceUrls.length === 0) {
+  if (workbenchId === "sku-background" && referenceInputs.length === 0) {
     return NextResponse.json(
       { error: "请至少上传一张背景图（reference_urls）" },
       { status: 400 }
     );
   }
 
-  if (workbenchId === "sku-background" && productUrls.length > MAX_BATCH) {
+  if (workbenchId === "sku-background" && productInputs.length > MAX_BATCH) {
     return NextResponse.json(
       { error: `SKU 产品图最多 ${MAX_BATCH} 张（每张生成 1 个任务）` },
       { status: 400 }
     );
   }
 
-  const merged = [...productUrls, ...referenceUrls];
+  const merged = [...productInputs, ...referenceInputs];
   if (merged.length > MAX_INPUTS) {
     return NextResponse.json(
       { error: `输入图合计最多 ${MAX_INPUTS} 张（产品 + 参考）` },
@@ -129,16 +182,28 @@ export async function POST(request: Request) {
     );
   }
 
-  const errP = validateUrls("产品图", productUrls);
-  if (errP) return NextResponse.json({ error: errP }, { status: 400 });
-  const errR = validateUrls(workbenchId === "sku-background" ? "背景图" : "参考图", referenceUrls);
-  if (errR) return NextResponse.json({ error: errR }, { status: 400 });
+  try {
+    productInputs = await prepareInputImages(apiKey, "产品图", productInputs);
+    referenceInputs = await prepareInputImages(
+      apiKey,
+      workbenchId === "sku-background" ? "背景图" : "参考图",
+      referenceInputs
+    );
+  } catch (e) {
+    return NextResponse.json(
+      { error: e instanceof Error ? e.message : "输入图不可用，请重新上传原图。" },
+      { status: 400 }
+    );
+  }
+
+  const productUrls = productInputs.map((item) => item.url);
+  const referenceUrls = referenceInputs.map((item) => item.url);
 
   let imageCount = Number(body.image_count);
   if (!Number.isFinite(imageCount) || imageCount < 1) imageCount = 1;
   imageCount = Math.min(MAX_BATCH, Math.floor(imageCount));
   const batchSize =
-    workbenchId === "sku-background" ? productUrls.length : imageCount;
+    workbenchId === "sku-background" ? productInputs.length : imageCount;
 
   const modelRow = getModelById(body.modelId);
   if (!modelRow || !modelRow.enabled) {
@@ -162,11 +227,15 @@ export async function POST(request: Request) {
     batchIndex: number;
     productUrls: string[];
     referenceUrls: string[];
+    productImages: InputImageMeta[];
+    referenceImages: InputImageMeta[];
   }[] = [];
 
   for (let i = 0; i < batchSize; i++) {
     const taskProductUrls =
       workbenchId === "sku-background" ? [productUrls[i]] : productUrls;
+    const taskProductInputs =
+      workbenchId === "sku-background" ? [productInputs[i]] : productInputs;
     const taskMerged = [...taskProductUrls, ...referenceUrls];
     const fullPrompt = buildAugmentedPrompt({
       userPrompt: body.prompt.trim(),
@@ -190,7 +259,7 @@ export async function POST(request: Request) {
 
     const created = await kieCreateTask(apiKey, kieBody);
     if (created.code !== 200 || !created.data?.taskId) {
-      const msg = kieErrorMessage(created);
+      const msg = mapKieFailureMessage(kieErrorMessage(created));
       if (jobs.length === 0) {
         return NextResponse.json(
           { error: msg, batchId, jobs: [] },
@@ -207,7 +276,10 @@ export async function POST(request: Request) {
 
     const id = randomUUID();
     const now = Date.now();
-    const taskInputUrlsJson = buildInputUrlsStorage(taskProductUrls, referenceUrls);
+    const taskInputUrlsJson = buildInputUrlsStorage(
+      taskProductInputs,
+      referenceInputs
+    );
     insertGeneration({
       id,
       task_id: created.data.taskId,
@@ -236,6 +308,8 @@ export async function POST(request: Request) {
       batchIndex: i,
       productUrls: taskProductUrls,
       referenceUrls,
+      productImages: taskProductInputs,
+      referenceImages: referenceInputs,
     });
   }
 

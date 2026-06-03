@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isAllowedInputImageUrl } from "@/lib/input-url";
-import { parseInputPayload } from "@/lib/input-payload";
+import { parseInputPayload, type InputImageMeta } from "@/lib/input-payload";
 import {
   EMPTY_WORKBENCH_DEFINITIONS,
   getWorkbenchLabel,
@@ -47,9 +47,12 @@ type ImageSlot = {
   url: string;
   previewUrl?: string;
   originalName?: string;
+  sourceUrl?: string;
   size?: number;
+  mimeType?: string;
   uploadedAt?: number;
-  backend?: "kie-file-upload" | "blob" | "local";
+  expiresAt?: number;
+  backend?: InputImageMeta["backend"];
 };
 
 type BatchOutputItem = {
@@ -60,6 +63,8 @@ type BatchOutputItem = {
   resultUrls: string[];
   productUrls: string[];
   referenceUrls: string[];
+  productInputs?: InputImageMeta[];
+  referenceInputs?: InputImageMeta[];
   failMsg?: string;
   costTimeMs?: number | null;
   clientElapsedMs?: number | null;
@@ -89,6 +94,8 @@ type CreatedJob = {
   batchIndex?: number;
   productUrls?: string[];
   referenceUrls?: string[];
+  productImages?: InputImageMeta[];
+  referenceImages?: InputImageMeta[];
 };
 
 type HistoryProject = {
@@ -161,13 +168,20 @@ function normalizeImageSlots(value: unknown): ImageSlot[] {
         typeof item.previewUrl === "string" ? item.previewUrl : undefined,
       originalName:
         typeof item.originalName === "string" ? item.originalName : undefined,
+      sourceUrl:
+        typeof item.sourceUrl === "string" ? item.sourceUrl : undefined,
       size:
         typeof item.size === "number" && Number.isFinite(item.size)
           ? item.size
           : undefined,
+      mimeType: typeof item.mimeType === "string" ? item.mimeType : undefined,
       uploadedAt:
         typeof item.uploadedAt === "number" && Number.isFinite(item.uploadedAt)
           ? item.uploadedAt
+          : undefined,
+      expiresAt:
+        typeof item.expiresAt === "number" && Number.isFinite(item.expiresAt)
+          ? item.expiresAt
           : undefined,
       backend:
         item.backend === "kie-file-upload" ||
@@ -181,6 +195,23 @@ function normalizeImageSlots(value: unknown): ImageSlot[] {
 function normalizeUrlArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((url): url is string => typeof url === "string");
+}
+
+function slotToInputImage(slot: ImageSlot): InputImageMeta {
+  return {
+    url: slot.url,
+    backend: slot.backend,
+    originalName: slot.originalName,
+    sourceUrl: slot.sourceUrl,
+    size: slot.size,
+    mimeType: slot.mimeType,
+    uploadedAt: slot.uploadedAt,
+    expiresAt: slot.expiresAt,
+  };
+}
+
+function inputImagesFromUrls(urls: string[]): InputImageMeta[] {
+  return urls.map((url) => ({ url }));
 }
 
 function normalizeBatchOutputs(value: unknown): BatchOutputItem[] | null {
@@ -205,6 +236,12 @@ function normalizeBatchOutputs(value: unknown): BatchOutputItem[] | null {
       resultUrls: normalizeUrlArray(item.resultUrls),
       productUrls: normalizeUrlArray(item.productUrls),
       referenceUrls: normalizeUrlArray(item.referenceUrls),
+      productInputs: Array.isArray(item.productInputs)
+        ? item.productInputs
+        : undefined,
+      referenceInputs: Array.isArray(item.referenceInputs)
+        ? item.referenceInputs
+        : undefined,
       failMsg: typeof item.failMsg === "string" ? item.failMsg : undefined,
       costTimeMs:
         typeof item.costTimeMs === "number" && Number.isFinite(item.costTimeMs)
@@ -666,7 +703,7 @@ export default function Workbench() {
     return "参考图最多 16 张。";
   };
 
-  const addUrls = (kind: "product" | "reference") => {
+  const addUrls = async (kind: "product" | "reference") => {
     const raw = kind === "product" ? pasteProduct.trim() : pasteRef.trim();
     if (!raw) return;
     const urls = splitImageUrlText(raw);
@@ -674,7 +711,7 @@ export default function Workbench() {
     const invalid = urls.find((url) => !isAllowedInputImageUrl(url));
     if (invalid) {
       setError(
-        `请输入有效地址：公网 https，或本机 http://localhost / http://127.0.0.1 …（无效：${invalid}）`
+        `请输入有效的公网图片地址，或直接用上传按钮上传原图。（无效：${invalid}）`
       );
       return;
     }
@@ -683,15 +720,48 @@ export default function Workbench() {
       setError(`本次最多还能添加 ${available} 张。${uploadLimitLabel(kind)}`);
       return;
     }
-    const slots = urls.map((url) => ({ id: crypto.randomUUID(), url }));
-    if (kind === "product") {
-      setProductSlots((s) => [...s, ...slots]);
-      setPasteProduct("");
-    } else {
-      setRefSlots((s) => [...s, ...slots]);
-      setPasteRef("");
-    }
+    setBusy(true);
     setError(null);
+    setUploadHint(null);
+    try {
+      const r = await fetch("/api/upload-url", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ urls }),
+      });
+      const j = (await r.json()) as {
+        items?: Array<InputImageMeta & { hint?: string }>;
+        error?: string;
+      };
+      if (!r.ok) throw new Error(j.error || "URL 镜像上传失败");
+      const items = j.items ?? [];
+      if (items.length !== urls.length) {
+        throw new Error("URL 镜像上传返回数量不一致，请重试。");
+      }
+      const slots: ImageSlot[] = items.map((item, idx) => ({
+        id: crypto.randomUUID(),
+        url: item.url,
+        originalName: item.originalName,
+        sourceUrl: item.sourceUrl || urls[idx],
+        size: item.size,
+        mimeType: item.mimeType,
+        uploadedAt: item.uploadedAt,
+        expiresAt: item.expiresAt,
+        backend: item.backend,
+      }));
+      if (kind === "product") {
+        setProductSlots((s) => [...s, ...slots]);
+        setPasteProduct("");
+      } else {
+        setRefSlots((s) => [...s, ...slots]);
+        setPasteRef("");
+      }
+      setUploadHint("已将 URL 图片镜像到 Kie 文件服务，生图时会使用新的 Kie 托管地址。");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "URL 镜像上传失败");
+    } finally {
+      setBusy(false);
+    }
   };
 
   const onFiles = async (files: FileList | null, kind: "product" | "reference") => {
@@ -719,8 +789,11 @@ export default function Workbench() {
             hint?: string;
             backend?: ImageSlot["backend"];
             originalName?: string;
+            sourceUrl?: string;
             size?: number;
+            mimeType?: string;
             uploadedAt?: number;
+            expiresAt?: number;
           };
           if (!r.ok) throw new Error(j.error || "上传失败");
           if (!j.url) throw new Error("上传无返回 URL");
@@ -729,9 +802,13 @@ export default function Workbench() {
             url: j.url,
             previewUrl,
             originalName: j.originalName || file.name,
+            sourceUrl: j.sourceUrl,
             size: typeof j.size === "number" ? j.size : file.size,
+            mimeType: j.mimeType || file.type,
             uploadedAt:
               typeof j.uploadedAt === "number" ? j.uploadedAt : Date.now(),
+            expiresAt:
+              typeof j.expiresAt === "number" ? j.expiresAt : undefined,
             backend: j.backend,
           };
           if (kind === "product") {
@@ -859,6 +936,8 @@ export default function Workbench() {
           workbench_definition: currentWorkbenchDefinition,
           product_urls: productWorkbench ? productSlots.map((s) => s.url) : [],
           reference_urls: refSlots.map((s) => s.url),
+          product_images: productWorkbench ? productSlots.map(slotToInputImage) : [],
+          reference_images: refSlots.map(slotToInputImage),
           image_count: n,
           aspect_ratio: aspect,
           resolution,
@@ -900,6 +979,9 @@ export default function Workbench() {
           resultUrls: [],
           productUrls: job.productUrls ?? [],
           referenceUrls: job.referenceUrls ?? [],
+          productInputs: job.productImages ?? inputImagesFromUrls(job.productUrls ?? []),
+          referenceInputs:
+            job.referenceImages ?? inputImagesFromUrls(job.referenceUrls ?? []),
         })),
       };
       setActiveProjects((prev) => [project, ...prev]);
@@ -930,6 +1012,9 @@ export default function Workbench() {
           workbench_definition: project.workbenchDefinition,
           product_urls: item.productUrls,
           reference_urls: item.referenceUrls,
+          product_images: item.productInputs ?? inputImagesFromUrls(item.productUrls),
+          reference_images:
+            item.referenceInputs ?? inputImagesFromUrls(item.referenceUrls),
           image_count: 1,
           aspect_ratio: project.aspect,
           resolution: project.resolution,
@@ -966,6 +1051,16 @@ export default function Workbench() {
                         productUrls: job.productUrls ?? candidateItem.productUrls,
                         referenceUrls:
                           job.referenceUrls ?? candidateItem.referenceUrls,
+                        productInputs:
+                          job.productImages ??
+                          candidateItem.productInputs ??
+                          inputImagesFromUrls(job.productUrls ?? candidateItem.productUrls),
+                        referenceInputs:
+                          job.referenceImages ??
+                          candidateItem.referenceInputs ??
+                          inputImagesFromUrls(
+                            job.referenceUrls ?? candidateItem.referenceUrls
+                          ),
                         failMsg: undefined,
                         costTimeMs: null,
                         clientElapsedMs: null,
@@ -1088,10 +1183,24 @@ export default function Workbench() {
       Math.min(10, Math.max(1, Math.floor(g.batch_size ?? rows.length) || 1))
     );
     const parsedInputs = rows.map((row) => parseInputPayload(row.input_urls));
-    const product = [...new Set(parsedInputs.flatMap((input) => input.product))];
-    const reference = [...new Set(parsedInputs.flatMap((input) => input.reference))];
-    setProductSlots(product.map((url) => ({ id: crypto.randomUUID(), url })));
-    setRefSlots(reference.map((url) => ({ id: crypto.randomUUID(), url })));
+    const productByUrl = new Map<string, InputImageMeta>();
+    const referenceByUrl = new Map<string, InputImageMeta>();
+    for (const input of parsedInputs) {
+      for (const item of input.productImages) productByUrl.set(item.url, item);
+      for (const item of input.referenceImages) referenceByUrl.set(item.url, item);
+    }
+    setProductSlots(
+      [...productByUrl.values()].map((item) => ({
+        id: crypto.randomUUID(),
+        ...item,
+      }))
+    );
+    setRefSlots(
+      [...referenceByUrl.values()].map((item) => ({
+        id: crypto.randomUUID(),
+        ...item,
+      }))
+    );
     const submittedAt = Math.min(...rows.map((row) => row.created_at));
     const projectPreview: ActiveProject = {
       id: project.key,
@@ -1117,6 +1226,8 @@ export default function Workbench() {
           resultUrls: parseResultUrls(row.result_urls),
           productUrls: input.product,
           referenceUrls: input.reference,
+          productInputs: input.productImages,
+          referenceInputs: input.referenceImages,
           failMsg: row.fail_msg || undefined,
           costTimeMs: null,
           clientElapsedMs: elapsed,
@@ -1327,7 +1438,7 @@ export default function Workbench() {
                   />
                   <button
                     type="button"
-                    onClick={() => addUrls("product")}
+                    onClick={() => void addUrls("product")}
                     className="shrink-0 rounded-md bg-accent px-2 py-1.5 text-xs font-medium text-white hover:bg-accent-hover"
                   >
                     批量添加
@@ -1445,7 +1556,7 @@ export default function Workbench() {
                   />
                   <button
                     type="button"
-                    onClick={() => addUrls("reference")}
+                    onClick={() => void addUrls("reference")}
                     className="shrink-0 rounded-md bg-accent px-2 py-1.5 text-xs font-medium text-white hover:bg-accent-hover"
                   >
                     批量添加

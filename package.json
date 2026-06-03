@@ -1,6 +1,6 @@
 {
   "name": "kie-image-workbench",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "description": "Kie internal image workbench",
   "author": "Internal",
