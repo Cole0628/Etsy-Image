@@ -95,6 +95,16 @@ export async function POST(request: Request) {
     }
   }
 
+  if (process.env.KIE_WORKBENCH_DATA_DIR && !process.env.BLOB_READ_WRITE_TOKEN) {
+    return NextResponse.json(
+      {
+        error:
+          "这台电脑还没有保存 Kie API Key。请先到「API Key」页保存 Key，再上传原图。",
+      },
+      { status: 401 }
+    );
+  }
+
   if (process.env.BLOB_READ_WRITE_TOKEN) {
     try {
       const safeName = file.name.replace(/[^\w.\-]+/g, "_") || "upload";

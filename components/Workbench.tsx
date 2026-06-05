@@ -214,6 +214,13 @@ function inputImagesFromUrls(urls: string[]): InputImageMeta[] {
   return urls.map((url) => ({ url }));
 }
 
+function friendlyFetchError(e: unknown, fallback: string): string {
+  if (e instanceof TypeError && /failed to fetch|fetch failed|networkerror/i.test(e.message)) {
+    return "本地服务连接已断开，页面无法访问上传接口。请刷新页面；如果仍然失败，请重启 KieWorkbench 或重新运行 npm run dev。";
+  }
+  return e instanceof Error ? e.message : fallback;
+}
+
 function normalizeBatchOutputs(value: unknown): BatchOutputItem[] | null {
   if (!Array.isArray(value)) return null;
   return value
@@ -439,7 +446,9 @@ function buildHistoryProjects(rows: Generation[]): HistoryProject[] {
 }
 
 export default function Workbench() {
-  const [uploadBackend, setUploadBackend] = useState<"kie-file-upload" | "blob" | "local">("local");
+  const [uploadBackend, setUploadBackend] = useState<
+    "kie-file-upload" | "blob" | "local" | "disabled"
+  >("local");
   const [kieKeyConfigured, setKieKeyConfigured] = useState(false);
   const [dragOverProduct, setDragOverProduct] = useState(false);
   const [dragOverRef, setDragOverRef] = useState(false);
@@ -483,42 +492,62 @@ export default function Workbench() {
   );
 
   const loadBootstrap = useCallback(async () => {
-    const r = await fetch("/api/bootstrap");
-    const j = (await r.json()) as {
-      uploadBackend?: "kie-file-upload" | "blob" | "local";
-      kieKeyConfigured?: boolean;
-    };
-    setUploadBackend(j.uploadBackend ?? "local");
-    setKieKeyConfigured(Boolean(j.kieKeyConfigured));
+    try {
+      const r = await fetch("/api/bootstrap");
+      if (!r.ok) throw new Error("读取上传配置失败");
+      const j = (await r.json()) as {
+        uploadBackend?: "kie-file-upload" | "blob" | "local" | "disabled";
+        kieKeyConfigured?: boolean;
+      };
+      setUploadBackend(j.uploadBackend ?? "local");
+      setKieKeyConfigured(Boolean(j.kieKeyConfigured));
+    } catch (e) {
+      setError(friendlyFetchError(e, "读取上传配置失败"));
+    }
   }, []);
 
   const loadModels = useCallback(async () => {
-    const r = await fetch("/api/models");
-    const j = (await r.json()) as { items: ModelRow[] };
-    setModels(j.items.filter((m) => m.enabled));
-    const def =
-      j.items.find((m) => m.enabled && m.is_default)?.id ??
-      j.items.find((m) => m.enabled)?.id ??
-      "";
-    setModelId((prev) => (prev && j.items.some((x) => x.id === prev) ? prev : def));
+    try {
+      const r = await fetch("/api/models");
+      if (!r.ok) throw new Error("读取模型列表失败");
+      const j = (await r.json()) as { items: ModelRow[] };
+      setModels(j.items.filter((m) => m.enabled));
+      const def =
+        j.items.find((m) => m.enabled && m.is_default)?.id ??
+        j.items.find((m) => m.enabled)?.id ??
+        "";
+      setModelId((prev) => (prev && j.items.some((x) => x.id === prev) ? prev : def));
+    } catch (e) {
+      setError(friendlyFetchError(e, "读取模型列表失败"));
+    }
   }, []);
 
   const loadHistory = useCallback(async () => {
-    const r = await fetch("/api/history");
-    const j = (await r.json()) as { items: Generation[] };
-    setHistory(j.items);
+    try {
+      const r = await fetch("/api/history");
+      if (!r.ok) throw new Error("读取历史失败");
+      const j = (await r.json()) as { items: Generation[] };
+      setHistory(j.items);
+    } catch (e) {
+      setError(friendlyFetchError(e, "读取历史失败"));
+    }
   }, []);
 
   const loadWorkbenchSettings = useCallback(async () => {
-    const r = await fetch("/api/settings/workbench");
-    const j = (await r.json()) as { items?: WorkbenchSettingsItem[] };
-    const next = { ...EMPTY_WORKBENCH_DEFINITIONS };
-    for (const item of j.items ?? []) {
-      if (isWorkbenchId(item.id)) {
-        next[item.id] = item.definition ?? "";
+    try {
+      const r = await fetch("/api/settings/workbench");
+      if (!r.ok) throw new Error("读取工作台设置失败");
+      const j = (await r.json()) as { items?: WorkbenchSettingsItem[] };
+      const next = { ...EMPTY_WORKBENCH_DEFINITIONS };
+      for (const item of j.items ?? []) {
+        if (isWorkbenchId(item.id)) {
+          next[item.id] = item.definition ?? "";
+        }
       }
+      setWorkbenchDefinitions(next);
+    } catch (e) {
+      setError(friendlyFetchError(e, "读取工作台设置失败"));
     }
-    setWorkbenchDefinitions(next);
   }, []);
 
   useEffect(() => {
@@ -704,6 +733,10 @@ export default function Workbench() {
   };
 
   const addUrls = async (kind: "product" | "reference") => {
+    if (uploadBackend === "disabled") {
+      setError("这台电脑还没有保存 Kie API Key。请先到「API Key」页保存 Key，再上传原图。");
+      return;
+    }
     const raw = kind === "product" ? pasteProduct.trim() : pasteRef.trim();
     if (!raw) return;
     const urls = splitImageUrlText(raw);
@@ -758,7 +791,7 @@ export default function Workbench() {
       }
       setUploadHint("已将 URL 图片镜像到 Kie 文件服务，生图时会使用新的 Kie 托管地址。");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "URL 镜像上传失败");
+      setError(friendlyFetchError(e, "URL 镜像上传失败"));
     } finally {
       setBusy(false);
     }
@@ -766,6 +799,10 @@ export default function Workbench() {
 
   const onFiles = async (files: FileList | null, kind: "product" | "reference") => {
     if (!files?.length) return;
+    if (uploadBackend === "disabled") {
+      setError("这台电脑还没有保存 Kie API Key。请先到「API Key」页保存 Key，再上传原图。");
+      return;
+    }
     const fileItems = Array.from(files);
     const available = getAvailableUploadSlots(kind);
     if (fileItems.length > available) {
@@ -824,7 +861,7 @@ export default function Workbench() {
         }
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "上传失败");
+      setError(friendlyFetchError(e, "上传失败"));
     } finally {
       setBusy(false);
     }
@@ -877,7 +914,7 @@ export default function Workbench() {
         );
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "下载失败");
+      setError(friendlyFetchError(e, "下载失败"));
     } finally {
       setDownloadActive(key, false);
     }
@@ -988,7 +1025,7 @@ export default function Workbench() {
       setSelectedActiveProjectId(project.id);
       void loadHistory();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "创建任务失败");
+      setError(friendlyFetchError(e, "创建任务失败"));
     } finally {
       setBusy(false);
     }
@@ -1071,7 +1108,7 @@ export default function Workbench() {
       );
       void loadHistory();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "重试任务创建失败");
+      setError(friendlyFetchError(e, "重试任务创建失败"));
     } finally {
       setBusy(false);
     }
@@ -1249,9 +1286,12 @@ export default function Workbench() {
         ? "已配置 Kie Key：图片会先传到 Kie 文件服务，生图时可被云端拉取。"
         : uploadBackend === "blob"
           ? "当前使用 Vercel Blob（公网 HTTPS）。"
-          : "当前写入本机 public/uploads。若未配置 Kie Key，Kie 无法拉取 localhost 图片，生图会失败。",
+          : uploadBackend === "disabled"
+            ? "这台电脑还没有保存 Kie API Key。请先到「API Key」页保存 Key，再上传原图。"
+            : "当前写入本机 public/uploads。若未配置 Kie Key，Kie 无法拉取 localhost 图片，生图会失败。",
     [uploadBackend]
   );
+  const uploadDisabled = busy || uploadBackend === "disabled";
 
   return (
     <div className="space-y-8">
@@ -1371,17 +1411,17 @@ export default function Workbench() {
                     dragOverProduct
                       ? "border-accent bg-accent/5 ring-2 ring-accent/40"
                       : "border-canvas-border bg-white/80"
-                  } ${busy ? "pointer-events-none opacity-60" : "cursor-pointer"}`}
+                  } ${uploadDisabled ? "pointer-events-none opacity-60" : "cursor-pointer"}`}
                   role="button"
                   tabIndex={0}
                   aria-label="上传产品图"
                   onClick={() => {
-                    if (busy) return;
+                    if (uploadDisabled) return;
                     if (Date.now() - lastDropProductRef.current < 600) return;
                     fileInputProductRef.current?.click();
                   }}
                   onKeyDown={(e) => {
-                    if (busy) return;
+                    if (uploadDisabled) return;
                     if (e.key === "Enter" || e.key === " ") {
                       e.preventDefault();
                       fileInputProductRef.current?.click();
@@ -1418,7 +1458,7 @@ export default function Workbench() {
                     multiple
                     className="sr-only"
                     tabIndex={-1}
-                    disabled={busy}
+                    disabled={uploadDisabled}
                     onChange={(e) => {
                       void onFiles(e.target.files, "product");
                       e.target.value = "";
@@ -1433,13 +1473,15 @@ export default function Workbench() {
                     value={pasteProduct}
                     onChange={(e) => setPasteProduct(e.target.value)}
                     rows={2}
+                    disabled={uploadDisabled}
                     placeholder="图片 URL，可一行一个或批量粘贴多个"
-                    className="min-w-0 flex-1 resize-y rounded-md border border-canvas-border px-2 py-1 text-xs outline-none ring-accent focus:ring-2"
+                    className="min-w-0 flex-1 resize-y rounded-md border border-canvas-border px-2 py-1 text-xs outline-none ring-accent focus:ring-2 disabled:opacity-60"
                   />
                   <button
                     type="button"
+                    disabled={uploadDisabled}
                     onClick={() => void addUrls("product")}
-                    className="shrink-0 rounded-md bg-accent px-2 py-1.5 text-xs font-medium text-white hover:bg-accent-hover"
+                    className="shrink-0 rounded-md bg-accent px-2 py-1.5 text-xs font-medium text-white hover:bg-accent-hover disabled:opacity-50"
                   >
                     批量添加
                   </button>
@@ -1485,17 +1527,17 @@ export default function Workbench() {
                     dragOverRef
                       ? "border-accent bg-accent/5 ring-2 ring-accent/40"
                       : "border-canvas-border bg-white/80"
-                  } ${busy ? "pointer-events-none opacity-60" : "cursor-pointer"}`}
+                  } ${uploadDisabled ? "pointer-events-none opacity-60" : "cursor-pointer"}`}
                   role="button"
                   tabIndex={0}
                   aria-label="上传参考图"
                   onClick={() => {
-                    if (busy) return;
+                    if (uploadDisabled) return;
                     if (Date.now() - lastDropRefRef.current < 600) return;
                     fileInputRefRef.current?.click();
                   }}
                   onKeyDown={(e) => {
-                    if (busy) return;
+                    if (uploadDisabled) return;
                     if (e.key === "Enter" || e.key === " ") {
                       e.preventDefault();
                       fileInputRefRef.current?.click();
@@ -1532,7 +1574,7 @@ export default function Workbench() {
                     multiple
                     className="sr-only"
                     tabIndex={-1}
-                    disabled={busy}
+                    disabled={uploadDisabled}
                     onChange={(e) => {
                       void onFiles(e.target.files, "reference");
                       e.target.value = "";
@@ -1551,13 +1593,15 @@ export default function Workbench() {
                     value={pasteRef}
                     onChange={(e) => setPasteRef(e.target.value)}
                     rows={2}
+                    disabled={uploadDisabled}
                     placeholder="图片 URL，可一行一个或批量粘贴多个"
-                    className="min-w-0 flex-1 resize-y rounded-md border border-canvas-border px-2 py-1 text-xs outline-none ring-accent focus:ring-2"
+                    className="min-w-0 flex-1 resize-y rounded-md border border-canvas-border px-2 py-1 text-xs outline-none ring-accent focus:ring-2 disabled:opacity-60"
                   />
                   <button
                     type="button"
+                    disabled={uploadDisabled}
                     onClick={() => void addUrls("reference")}
-                    className="shrink-0 rounded-md bg-accent px-2 py-1.5 text-xs font-medium text-white hover:bg-accent-hover"
+                    className="shrink-0 rounded-md bg-accent px-2 py-1.5 text-xs font-medium text-white hover:bg-accent-hover disabled:opacity-50"
                   >
                     批量添加
                   </button>
