@@ -45,6 +45,12 @@ export default function RootLayout({
               >
                 下载设置
               </Link>
+              <Link
+                href="/settings/network"
+                className="rounded-md px-2 py-1 hover:bg-canvas-muted hover:text-ink"
+              >
+                网络诊断
+              </Link>
             </nav>
           </div>
         </header>

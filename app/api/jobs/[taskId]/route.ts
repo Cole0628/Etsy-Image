@@ -26,7 +26,7 @@ export async function GET(
   const info = await kieRecordInfo(apiKey, taskId);
   if (info.code !== 200 || info.data == null) {
     return NextResponse.json(
-      { error: kieErrorMessage(info), raw: info },
+      { error: mapKieFailureMessage(kieErrorMessage(info)), raw: info },
       { status: 502 }
     );
   }
