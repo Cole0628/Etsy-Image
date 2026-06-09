@@ -46,4 +46,12 @@ test("maps common Kie failures into user-facing Chinese messages", () => {
     mapKieFailureMessage("Internal Error, Please try again later."),
     "Kie 上游生成失败，请重试本张。"
   );
+  assert.equal(
+    mapKieFailureMessage("fetch failed"),
+    "无法连接 Kie 服务，请检查这台电脑的网络、VPN/代理、防火墙或杀毒软件。"
+  );
+  assert.equal(
+    mapKieFailureMessage("Unexpected token '<', \"<!DOCTYPE \"... is not valid JSON"),
+    "Kie 接口返回了网页而不是 JSON，通常是网络代理、登录页、防火墙或网关拦截导致。"
+  );
 });

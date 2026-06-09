@@ -1,4 +1,5 @@
 import uploadNaming from "./upload-naming";
+import { kieFetch } from "@/lib/kie/proxy-fetch";
 
 const { buildKieUploadNames } = uploadNaming as {
   buildKieUploadNames: (originalName: string) => {
@@ -40,6 +41,34 @@ type StreamUploadJson = {
 };
 
 const KIE_UPLOAD_TTL_MS = 3 * 24 * 60 * 60 * 1000;
+
+function uploadNetworkErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error || "");
+  if (/fetch failed|failed to fetch|networkerror|econnreset|enotfound|etimedout|econnrefused/i.test(message)) {
+    return "无法连接 Kie 图片上传服务，请检查这台电脑的网络、VPN/代理、防火墙或杀毒软件，或到「网络诊断」里设置代理。";
+  }
+  return message || "连接 Kie 图片上传服务失败。";
+}
+
+async function uploadJsonResponse(
+  res: Response,
+  label: string
+): Promise<{ json: StreamUploadJson; text: string }> {
+  const text = await res.text();
+  try {
+    return { json: JSON.parse(text) as StreamUploadJson, text };
+  } catch {
+    const preview = text.trim().slice(0, 240);
+    if (preview.startsWith("<")) {
+      throw new Error(
+        `${label}返回了网页而不是 JSON，通常是网络代理、登录页、防火墙、杀毒软件或公司网关拦截导致。请到「网络诊断」里设置代理后重试。`
+      );
+    }
+    throw new Error(
+      `${label}响应异常 (${res.status}): ${preview || "空响应"}`
+    );
+  }
+}
 
 export type KieUploadResult = {
   url: string;
@@ -135,22 +164,18 @@ export async function kieFileStreamUpload(
   form.append("uploadPath", uploadNames.uploadPath);
   form.append("fileName", uploadNames.fileName);
 
-  const res = await fetch(`${fileUploadBase()}/api/file-stream-upload`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}` },
-    body: form,
-    cache: "no-store",
-  });
-
-  const text = await res.text();
-  let json: StreamUploadJson;
+  let res: Response;
   try {
-    json = JSON.parse(text) as StreamUploadJson;
-  } catch {
-    throw new Error(
-      `Kie 文件上传响应异常 (${res.status}): ${text.slice(0, 240)}`
-    );
+    res = await kieFetch(`${fileUploadBase()}/api/file-stream-upload`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body: form,
+      cache: "no-store",
+    });
+  } catch (e) {
+    throw new Error(uploadNetworkErrorMessage(e));
   }
+  const { json, text } = await uploadJsonResponse(res, "Kie 文件上传服务");
 
   const url = pickPublicFileUrl(json.data);
   if (url) {
@@ -185,29 +210,25 @@ export async function kieFileUrlUpload(
   originalName?: string
 ): Promise<KieUploadResult> {
   const uploadNames = buildKieUploadNames(originalName || "image.jpg");
-  const res = await fetch(`${fileUploadBase()}/api/file-url-upload`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      fileUrl,
-      uploadPath: uploadNames.uploadPath,
-      fileName: uploadNames.fileName,
-    }),
-    cache: "no-store",
-  });
-
-  const text = await res.text();
-  let json: StreamUploadJson;
+  let res: Response;
   try {
-    json = JSON.parse(text) as StreamUploadJson;
-  } catch {
-    throw new Error(
-      `Kie URL 文件上传响应异常 (${res.status}): ${text.slice(0, 240)}`
-    );
+    res = await kieFetch(`${fileUploadBase()}/api/file-url-upload`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        fileUrl,
+        uploadPath: uploadNames.uploadPath,
+        fileName: uploadNames.fileName,
+      }),
+      cache: "no-store",
+    });
+  } catch (e) {
+    throw new Error(uploadNetworkErrorMessage(e));
   }
+  const { json, text } = await uploadJsonResponse(res, "Kie URL 文件上传服务");
 
   const url = pickPublicFileUrl(json.data);
   if (url) {

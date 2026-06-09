@@ -33,3 +33,4 @@ public/uploads/kie-workbench/*
 
 # typescript
 next-env.d.ts
+tsconfig.tsbuildinfo
