@@ -14,9 +14,10 @@ import preflight from "@/lib/kie/input-url-preflight";
 import { getEffectiveKieApiKey } from "@/lib/settings";
 import {
   appendRuntimeEvent,
+  buildLocalTaskExpectations,
+  buildTaskEventDetails,
   buildTaskIntegrityFindings,
   parseKieTaskParam,
-  safeImageReferences,
 } from "@/lib/runtime-log";
 
 export const dynamic = "force-dynamic";
@@ -31,29 +32,40 @@ export async function GET(
   const { taskId } = await context.params;
   const queryStartedAt = Date.now();
   const expected = getGenerationByTaskId(taskId);
-  appendRuntimeEvent("kie.task.query.request", {
+  const pollingCorrelation = {
+    localGenerationId: expected?.id,
+    batchId: expected?.batch_id,
+    batchIndex: expected?.batch_index,
     requestedTaskId: taskId,
     expectedModel: expected?.submitted_model ?? undefined,
-  });
+    aspectRatio: expected?.aspect_ratio,
+    resolution: expected?.resolution,
+  };
+  appendRuntimeEvent("kie.task.query.request", buildTaskEventDetails({
+    ...pollingCorrelation,
+    submittedPrompt: expected?.submitted_prompt ?? undefined,
+  }));
   const apiKey = getEffectiveKieApiKey();
   if (!apiKey) {
-    appendRuntimeEvent("kie.task.query.failed", {
-      requestedTaskId: taskId,
+    appendRuntimeEvent("kie.task.query.failed", buildTaskEventDetails({
+      ...pollingCorrelation,
+      submittedPrompt: expected?.submitted_prompt ?? undefined,
       statusCode: 401,
       error: "KIE API key is not configured.",
       elapsedMs: Date.now() - queryStartedAt,
-    });
+    }));
     return NextResponse.json({ error: "未配置 Kie API Key" }, { status: 401 });
   }
 
   const info = await kieRecordInfo(apiKey, taskId);
   if (info.code !== 200 || info.data == null) {
-    appendRuntimeEvent("kie.task.query.failed", {
-      requestedTaskId: taskId,
+    appendRuntimeEvent("kie.task.query.failed", buildTaskEventDetails({
+      ...pollingCorrelation,
+      submittedPrompt: expected?.submitted_prompt ?? undefined,
       statusCode: info.code,
       error: "KIE task query failed.",
       elapsedMs: Date.now() - queryStartedAt,
-    });
+    }));
     return NextResponse.json(
       { error: mapKieFailureMessage(kieErrorMessage(info)), raw: info },
       { status: 502 }
@@ -64,11 +76,15 @@ export async function GET(
   const resultUrls = parseResultUrls(data.resultJson);
   const parsedParam = parseKieTaskParam(data.param) as {
     prompt?: string;
-    inputUrls: string[];
+    inputUrls?: string[];
   };
-  const expectedInputs = expected
+  const expectedInputUrls = expected
     ? parseInputPayload(expected.input_urls).merged
-    : [];
+    : undefined;
+  const localExpectations = buildLocalTaskExpectations(
+    expected,
+    expectedInputUrls
+  );
   const history = listGenerations(500);
   const otherRows = history.filter((row) => row.id !== expected?.id);
   const otherResults = otherRows.flatMap((row) => {
@@ -86,9 +102,7 @@ export async function GET(
   });
   const findings = buildTaskIntegrityFindings({
     requestedTaskId: taskId,
-    expectedModel: expected?.submitted_model ?? undefined,
-    expectedPrompt: expected?.submitted_prompt ?? undefined,
-    expectedInputUrls: expectedInputs,
+    ...localExpectations,
     returnedTaskId: data.taskId,
     returnedModel: data.model,
     returnedParam: data.param,
@@ -122,16 +136,18 @@ export async function GET(
   }
   updateGenerationByTaskId(taskId, patch);
 
-  appendRuntimeEvent("kie.task.query.response", {
-    requestedTaskId: taskId,
+  appendRuntimeEvent("kie.task.query.response", buildTaskEventDetails({
+    ...pollingCorrelation,
     returnedTaskId: data.taskId,
+    returnedModel: data.model,
     state,
+    submittedPrompt: localExpectations.expectedPrompt,
     prompt: parsedParam.prompt,
-    inputImages: safeImageReferences(parsedParam.inputUrls),
-    resultImages: safeImageReferences(resultUrls),
+    inputUrls: parsedParam.inputUrls,
+    resultUrls,
     elapsedMs: Date.now() - queryStartedAt,
     findings,
-  });
+  }));
 
   return NextResponse.json({
     taskId: data.taskId,

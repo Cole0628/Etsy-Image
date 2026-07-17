@@ -72,6 +72,25 @@ test("exports full prompts, redacts secrets, and aggregates findings", () => {
   assert.equal(bundle.events[0].details.prompt, "完整提示词");
   assert.equal(bundle.events[0].details.apiKey, "[REDACTED]");
   assert.equal(bundle.anomalies.prompt_mismatch.count, 1);
+  assert.deepEqual(bundle.anomalySummary, {
+    countUnit: "event_occurrences",
+    deduplicated: false,
+  });
+});
+
+test("labels repeated anomaly counts as event occurrences", () => {
+  const logDir = createLogDir();
+  const store = createRuntimeLogStore({ logDir, appVersion: "test-version" });
+  for (let index = 0; index < 2; index += 1) {
+    store.appendRuntimeEvent("kie.task.query.response", {
+      localGenerationId: "generation-1",
+      findings: [{ code: "prompt_mismatch", severity: "error" }],
+    });
+  }
+  const bundle = store.buildDiagnosticBundle();
+  assert.equal(bundle.anomalies.prompt_mismatch.count, 2);
+  assert.equal(bundle.anomalySummary.countUnit, "event_occurrences");
+  assert.equal(bundle.anomalySummary.deduplicated, false);
 });
 
 test("returns a valid empty bundle when no log directory exists", () => {

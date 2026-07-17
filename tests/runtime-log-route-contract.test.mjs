@@ -20,6 +20,8 @@ test("generation creation emits structured runtime boundaries", () => {
       new RegExp(`appendRuntimeEvent\\(\\s*[\"']${event}[\"']`)
     );
   }
+  assert.match(source, /buildTaskEventDetails/);
+  assert.match(source, /localGenerationId/);
   assert.doesNotMatch(source, /appendRuntimeEvent\([^;]*apiKey/s);
 });
 
@@ -32,5 +34,21 @@ test("generation polling logs KIE query and integrity findings", () => {
   assert.match(source, /kie\.task\.query\.failed/);
   assert.match(source, /kie\.task\.query\.response/);
   assert.match(source, /buildTaskIntegrityFindings/);
+  assert.match(source, /buildLocalTaskExpectations/);
+  assert.match(source, /buildTaskEventDetails/);
+  assert.ok(
+    source.indexOf("const info = await kieRecordInfo")
+      < source.indexOf("parseInputPayload(expected.input_urls)"),
+    "stored inputs must not be parsed before the existing upstream success boundary"
+  );
   assert.doesNotMatch(source, /appendRuntimeEvent\([^;]*apiKey/s);
+});
+
+test("runtime export route constructs validated success and safe error responses", () => {
+  const source = readFileSync(
+    new URL("../app/api/settings/logs/export/route.ts", import.meta.url),
+    "utf8"
+  );
+  assert.match(source, /buildDiagnosticExportResponse/);
+  assert.match(source, /buildDiagnosticExportErrorResponse/);
 });

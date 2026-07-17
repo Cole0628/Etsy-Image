@@ -20,7 +20,11 @@ import {
   type CreateImageTaskInput,
 } from "@/lib/kie/client";
 import { getEffectiveKieApiKey } from "@/lib/settings";
-import { appendRuntimeEvent, safeImageReferences } from "@/lib/runtime-log";
+import {
+  appendRuntimeEvent,
+  buildTaskEventDetails,
+  safeImageReferences,
+} from "@/lib/runtime-log";
 import {
   isWorkbenchId,
   LEGACY_WORKBENCH_ID,
@@ -283,6 +287,7 @@ export async function POST(request: Request) {
       variantIndex: i,
       variantTotal: batchSize,
     });
+    const id = randomUUID();
 
     const kieBody: CreateImageTaskInput = {
       model: modelRow.kie_model,
@@ -294,28 +299,33 @@ export async function POST(request: Request) {
       },
     };
 
-    appendRuntimeEvent("kie.task.create.request", {
+    appendRuntimeEvent("kie.task.create.request", buildTaskEventDetails({
       requestId,
+      localGenerationId: id,
       batchId,
       batchIndex: i,
-      submittedModel: modelRow.kie_model,
+      expectedModel: modelRow.kie_model,
       submittedPrompt: fullPrompt,
-      aspect,
+      aspectRatio: aspect,
       resolution,
-      inputImages: safeImageReferences(taskMerged),
-    });
+      inputUrls: taskMerged,
+    }));
     const created = await kieCreateTask(apiKey, kieBody);
     if (created.code !== 200 || !created.data?.taskId) {
       const msg = mapKieFailureMessage(kieErrorMessage(created));
-      appendRuntimeEvent("kie.task.create.failed", {
+      appendRuntimeEvent("kie.task.create.failed", buildTaskEventDetails({
         requestId,
+        localGenerationId: id,
         batchId,
         batchIndex: i,
-        submittedModel: modelRow.kie_model,
+        expectedModel: modelRow.kie_model,
         submittedPrompt: fullPrompt,
+        aspectRatio: aspect,
+        resolution,
+        inputUrls: taskMerged,
         error: "KIE task creation failed.",
         statusCode: created.code,
-      });
+      }));
       if (jobs.length === 0) {
         return NextResponse.json(
           { error: msg, batchId, jobs: [] },
@@ -341,19 +351,19 @@ export async function POST(request: Request) {
           },
         ]
       : undefined;
-    appendRuntimeEvent("kie.task.create.response", {
+    appendRuntimeEvent("kie.task.create.response", buildTaskEventDetails({
       requestId,
+      localGenerationId: id,
       batchId,
       batchIndex: i,
-      taskId: created.data.taskId,
-      submittedModel: modelRow.kie_model,
+      returnedTaskId: created.data.taskId,
+      expectedModel: modelRow.kie_model,
       submittedPrompt: fullPrompt,
-      aspect,
+      aspectRatio: aspect,
       resolution,
-      inputImages: safeImageReferences(taskMerged),
+      inputUrls: taskMerged,
       findings,
-    });
-    const id = randomUUID();
+    }));
     const now = Date.now();
     const taskInputUrlsJson = buildInputUrlsStorage(
       taskProductInputs,

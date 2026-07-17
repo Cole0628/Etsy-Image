@@ -22,6 +22,26 @@ test("creates stable fingerprints and privacy-safe image references", () => {
   });
 });
 
+test("drops a percent-encoded nested URL from the exported filename", () => {
+  const url =
+    "https://cdn.example.com/cache/https%3A%2F%2Fimages.example.net%2Fprivate.png%3Ftoken%3Dnested-secret";
+  const reference = safeImageReference(url);
+  assert.equal(reference.host, "cdn.example.com");
+  assert.equal(reference.filename, "");
+  assert.equal(reference.fingerprint, fingerprint(url));
+  assert.doesNotMatch(JSON.stringify(reference), /images\.example\.net|token|nested-secret/i);
+});
+
+test("drops encoded signed parameters from the exported filename", () => {
+  const url =
+    "https://cdn.example.com/product.png%3FX-Amz-Credential%3Daccount%252Fscope%26X-Amz-Signature%3Dsigned-secret";
+  const reference = safeImageReference(url);
+  assert.equal(reference.host, "cdn.example.com");
+  assert.equal(reference.filename, "");
+  assert.equal(reference.fingerprint, fingerprint(url));
+  assert.doesNotMatch(JSON.stringify(reference), /credential|signature|signed-secret/i);
+});
+
 test("keeps full prompts but removes credentials and readable URLs", () => {
   const value = sanitizeForLog({
     prompt: "完整提示词：https://example.com may appear as user-authored text",
@@ -61,6 +81,35 @@ test("parses KIE nested param input", () => {
     prompt: "submitted prompt",
     inputUrls: ["https://cdn.example.com/a.png"],
   });
+});
+
+test("preserves an absent upstream input list separately from an empty list", () => {
+  const absent = parseKieTaskParam(JSON.stringify({ input: "{}" }));
+  const empty = parseKieTaskParam(
+    JSON.stringify({ input: JSON.stringify({ input_urls: [] }) })
+  );
+  assert.equal(Object.hasOwn(absent, "inputUrls"), false);
+  assert.deepEqual(empty.inputUrls, []);
+});
+
+test("reports absent upstream fields when local expectations exist", () => {
+  const findings = buildTaskIntegrityFindings({
+    expectedModel: "model-a",
+    expectedPrompt: "",
+    expectedInputUrls: [],
+    returnedParam: JSON.stringify({ input: "{}" }),
+  });
+  assert.deepEqual(
+    new Set(findings.map((item) => item.code)),
+    new Set(["model_mismatch", "prompt_mismatch", "input_images_mismatch"])
+  );
+});
+
+test("skips absent comparisons when no local expectations exist", () => {
+  const findings = buildTaskIntegrityFindings({
+    returnedParam: JSON.stringify({ input: "{}" }),
+  });
+  assert.deepEqual(findings, []);
 });
 
 test("detects upstream task, prompt, input, model, and reused-result anomalies", () => {
@@ -103,6 +152,20 @@ test("does not flag reused results without a non-empty explicit other task ID", 
     otherResults: [
       { url: "https://cdn.example.com/result.png" },
       { taskId: "", url: "https://cdn.example.com/result.png" },
+    ],
+  });
+  assert.equal(findings.some((item) => item.code === "result_image_reused"), false);
+});
+
+test("does not flag a result reused by a historical entry for the returned task", () => {
+  const findings = buildTaskIntegrityFindings({
+    returnedTaskId: "same-upstream-task",
+    resultUrls: ["https://cdn.example.com/result.png"],
+    otherResults: [
+      {
+        taskId: "same-upstream-task",
+        url: "https://cdn.example.com/result.png",
+      },
     ],
   });
   assert.equal(findings.some((item) => item.code === "result_image_reused"), false);
