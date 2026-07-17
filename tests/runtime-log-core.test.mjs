@@ -37,6 +37,17 @@ test("keeps full prompts but removes credentials and readable URLs", () => {
   assert.doesNotMatch(value.error, /token=secret|https:\/\//);
 });
 
+test("redacts separator and prefixed credential key names", () => {
+  const value = sanitizeForLog({
+    api_key: "secret-api-key",
+    "X-API-Key": "secret-header-key",
+    service_credential: "secret-credential",
+  });
+  assert.equal(value.api_key, "[REDACTED]");
+  assert.equal(value["X-API-Key"], "[REDACTED]");
+  assert.equal(value.service_credential, "[REDACTED]");
+});
+
 test("parses KIE nested param input", () => {
   const param = JSON.stringify({
     model: "gpt-image-2-image-to-image",
@@ -83,4 +94,16 @@ test("detects upstream task, prompt, input, model, and reused-result anomalies",
       "result_image_reused",
     ])
   );
+});
+
+test("does not flag reused results without a non-empty explicit other task ID", () => {
+  const findings = buildTaskIntegrityFindings({
+    resultUrls: ["https://cdn.example.com/result.png"],
+    otherTaskIds: ["other-task"],
+    otherResults: [
+      { url: "https://cdn.example.com/result.png" },
+      { taskId: "", url: "https://cdn.example.com/result.png" },
+    ],
+  });
+  assert.equal(findings.some((item) => item.code === "result_image_reused"), false);
 });
