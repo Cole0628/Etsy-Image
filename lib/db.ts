@@ -27,6 +27,8 @@ export type GenerationRow = {
   batch_size?: number | null;
   workbench_id?: string | null;
   workbench_definition?: string | null;
+  submitted_prompt?: string | null;
+  submitted_model?: string | null;
 };
 export type ModelRow = {
   id: string;
@@ -162,6 +164,10 @@ export function insertGeneration(row: GenerationRow) {
   mutate((s) => {
     s.generations.push(row);
   });
+}
+
+export function getGenerationByTaskId(taskId: string): GenerationRow | null {
+  return readState().generations.find((row) => row.task_id === taskId) ?? null;
 }
 
 export function updateGenerationByTaskId(

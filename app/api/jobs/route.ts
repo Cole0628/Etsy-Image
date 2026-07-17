@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import { randomUUID } from "crypto";
-import { insertGeneration, getModelById } from "@/lib/db";
+import {
+  getGenerationByTaskId,
+  getModelById,
+  insertGeneration,
+} from "@/lib/db";
 import { isAllowedInputImageUrl } from "@/lib/input-url";
 import {
   buildAugmentedPrompt,
@@ -16,6 +20,7 @@ import {
   type CreateImageTaskInput,
 } from "@/lib/kie/client";
 import { getEffectiveKieApiKey } from "@/lib/settings";
+import { appendRuntimeEvent, safeImageReferences } from "@/lib/runtime-log";
 import {
   isWorkbenchId,
   LEGACY_WORKBENCH_ID,
@@ -123,6 +128,7 @@ export async function POST(request: Request) {
   } catch {
     return NextResponse.json({ error: "无效的 JSON" }, { status: 400 });
   }
+  const requestId = randomUUID();
 
   if (!body.prompt?.trim()) {
     return NextResponse.json({ error: "prompt 必填" }, { status: 400 });
@@ -182,6 +188,18 @@ export async function POST(request: Request) {
     );
   }
 
+  const userPrompt = body.prompt.trim();
+  appendRuntimeEvent("generation.request.accepted", {
+    requestId,
+    prompt: userPrompt,
+    modelId: body.modelId,
+    workbenchId,
+    productImages: safeImageReferences(productInputs.map((input) => input.url)),
+    referenceImages: safeImageReferences(
+      referenceInputs.map((input) => input.url)
+    ),
+  });
+
   try {
     productInputs = await prepareInputImages(apiKey, "产品图", productInputs);
     referenceInputs = await prepareInputImages(
@@ -190,14 +208,33 @@ export async function POST(request: Request) {
       referenceInputs
     );
   } catch (e) {
+    const error =
+      e instanceof Error ? e.message : "输入图不可用，请重新上传原图。";
+    appendRuntimeEvent("generation.input.failed", {
+      requestId,
+      workbenchId,
+      error: "Input image preparation failed.",
+      productImages: safeImageReferences(
+        productInputs.map((input) => input.url)
+      ),
+      referenceImages: safeImageReferences(
+        referenceInputs.map((input) => input.url)
+      ),
+    });
     return NextResponse.json(
-      { error: e instanceof Error ? e.message : "输入图不可用，请重新上传原图。" },
+      { error },
       { status: 400 }
     );
   }
 
   const productUrls = productInputs.map((item) => item.url);
   const referenceUrls = referenceInputs.map((item) => item.url);
+  appendRuntimeEvent("generation.input.prepared", {
+    requestId,
+    workbenchId,
+    productImages: safeImageReferences(productUrls),
+    referenceImages: safeImageReferences(referenceUrls),
+  });
 
   let imageCount = Number(body.image_count);
   if (!Number.isFinite(imageCount) || imageCount < 1) imageCount = 1;
@@ -238,7 +275,7 @@ export async function POST(request: Request) {
       workbenchId === "sku-background" ? [productInputs[i]] : productInputs;
     const taskMerged = [...taskProductUrls, ...referenceUrls];
     const fullPrompt = buildAugmentedPrompt({
-      userPrompt: body.prompt.trim(),
+      userPrompt,
       workbenchId,
       workbenchDefinition,
       productCount: taskProductUrls.length,
@@ -257,9 +294,28 @@ export async function POST(request: Request) {
       },
     };
 
+    appendRuntimeEvent("kie.task.create.request", {
+      requestId,
+      batchId,
+      batchIndex: i,
+      submittedModel: modelRow.kie_model,
+      submittedPrompt: fullPrompt,
+      aspect,
+      resolution,
+      inputImages: safeImageReferences(taskMerged),
+    });
     const created = await kieCreateTask(apiKey, kieBody);
     if (created.code !== 200 || !created.data?.taskId) {
       const msg = mapKieFailureMessage(kieErrorMessage(created));
+      appendRuntimeEvent("kie.task.create.failed", {
+        requestId,
+        batchId,
+        batchIndex: i,
+        submittedModel: modelRow.kie_model,
+        submittedPrompt: fullPrompt,
+        error: "KIE task creation failed.",
+        statusCode: created.code,
+      });
       if (jobs.length === 0) {
         return NextResponse.json(
           { error: msg, batchId, jobs: [] },
@@ -274,6 +330,29 @@ export async function POST(request: Request) {
       });
     }
 
+    const existingGeneration = getGenerationByTaskId(created.data.taskId);
+    const findings = existingGeneration
+      ? [
+          {
+            code: "task_id_reused",
+            severity: "error",
+            message: "KIE returned a task ID that already exists.",
+            relatedTaskId: existingGeneration.task_id,
+          },
+        ]
+      : undefined;
+    appendRuntimeEvent("kie.task.create.response", {
+      requestId,
+      batchId,
+      batchIndex: i,
+      taskId: created.data.taskId,
+      submittedModel: modelRow.kie_model,
+      submittedPrompt: fullPrompt,
+      aspect,
+      resolution,
+      inputImages: safeImageReferences(taskMerged),
+      findings,
+    });
     const id = randomUUID();
     const now = Date.now();
     const taskInputUrlsJson = buildInputUrlsStorage(
@@ -284,7 +363,9 @@ export async function POST(request: Request) {
       id,
       task_id: created.data.taskId,
       model: modelRow.id,
-      prompt: body.prompt.trim(),
+      prompt: userPrompt,
+      submitted_prompt: fullPrompt,
+      submitted_model: modelRow.kie_model,
       aspect_ratio: aspect,
       resolution,
       input_urls: taskInputUrlsJson,
