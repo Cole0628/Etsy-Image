@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 
 import storeModule from "../lib/runtime-log-store.js";
 
-const { createRuntimeLogStore } = storeModule;
+const { createRuntimeLogStore, diagnosticExportFilename } = storeModule;
 const temporaryDirectories = [];
 
 function createLogDir() {
@@ -19,6 +19,13 @@ afterEach(() => {
   while (temporaryDirectories.length > 0) {
     rmSync(temporaryDirectories.pop(), { recursive: true, force: true });
   }
+});
+
+test("builds a filesystem-safe timestamped export filename", () => {
+  assert.equal(
+    diagnosticExportFilename(new Date("2026-07-17T12:34:56.000Z")),
+    "kie-runtime-diagnostic-2026-07-17T12-34-56-000Z.json"
+  );
 });
 
 test("rotates bounded NDJSON files and reads events oldest to newest", () => {

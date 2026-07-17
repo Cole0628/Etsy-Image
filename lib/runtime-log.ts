@@ -42,3 +42,7 @@ export function buildDiagnosticBundle() {
     return null;
   }
 }
+
+export function diagnosticExportFilename(date: Date) {
+  return store.diagnosticExportFilename(date);
+}
