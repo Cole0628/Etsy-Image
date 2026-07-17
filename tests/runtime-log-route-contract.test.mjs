@@ -22,3 +22,15 @@ test("generation creation emits structured runtime boundaries", () => {
   }
   assert.doesNotMatch(source, /appendRuntimeEvent\([^;]*apiKey/s);
 });
+
+test("generation polling logs KIE query and integrity findings", () => {
+  const source = readFileSync(
+    new URL("../app/api/jobs/[taskId]/route.ts", import.meta.url),
+    "utf8"
+  );
+  assert.match(source, /kie\.task\.query\.request/);
+  assert.match(source, /kie\.task\.query\.failed/);
+  assert.match(source, /kie\.task\.query\.response/);
+  assert.match(source, /buildTaskIntegrityFindings/);
+  assert.doesNotMatch(source, /appendRuntimeEvent\([^;]*apiKey/s);
+});
