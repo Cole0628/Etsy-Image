@@ -6,6 +6,10 @@ import { execSync } from "child_process";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import {
+  assertStandaloneOutputSafe,
+  sanitizeStandaloneOutput,
+} from "./standalone-package-policy.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(__dirname, "..");
@@ -53,6 +57,9 @@ async function main() {
   if (fs.existsSync(publicSrc)) {
     fs.cpSync(publicSrc, path.join(dest, "public"), { recursive: true });
   }
+
+  sanitizeStandaloneOutput(dest);
+  assertStandaloneOutputSafe(dest);
 
   if (process.platform === "win32") {
     const cacheDir = path.join(root, "release", "cache");
