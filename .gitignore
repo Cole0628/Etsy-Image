@@ -18,6 +18,7 @@ dev-server*.log
 # local data
 /data
 /Output
+/.superpowers/
 
 # uploaded reference images (local dev)
 public/uploads/kie-workbench/*
